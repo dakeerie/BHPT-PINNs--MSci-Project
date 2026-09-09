@@ -644,7 +644,7 @@ ax2.axhline(1.0, color = 'red', linestyle = ':', linewidth = 1, label = r'Target
 
 lines1, labels1 = ax1.get_legend_handles_labels()
 lines2, labels2 = ax2.get_legend_handles_labels()
-ax1.legend(lines1 + lines2, labels1 + labels2, fontsize = 11, loc = 'best')
+ax1.legend(lines1 + lines2, labels1 + labels2, fontsize = 11, loc = 'lower left')
 plt.title(f'l = {mode}, omega = {omega}', fontsize = 16)
 plt.tight_layout()
 plt.savefig(f'{base_path}/GBFProb.png', format = 'png')
