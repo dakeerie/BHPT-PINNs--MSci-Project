@@ -189,7 +189,7 @@ c1_re, c1_im, c2_re, c2_im = taylor_coeffs(mass, omega, mode)
 def ansatz(model, x_tensor, mass, omega):
     NN = model(x_tensor)
     P_re, P_im, Q_re, Q_im = NN[:, 0:1], NN[:, 1:2], NN[:, 2:3], NN[:, 3:4]
-    x_safe = x_tensor.clamp(min = 1e-12)
+    x_safe = x_tensor.clamp(min = 1e-12, max = 1 - 1e-3)
     rstar = 2*mass/(1 - x_safe) + 2*mass*t.log(x_safe/(1 - x_safe))
     cs, sn = t.cos(2*omega*rstar), t.sin(2*omega*rstar)
 
@@ -235,7 +235,7 @@ def compute_loss(model, x_tensor, mass, mode, omega):
     # loss_flux = t.mean(J**2/(det_scale + epsilon))
     loss_flux = t.mean(J**2)
 
-    total_loss = loss_ode + loss_flux
+    total_loss = loss_ode + 10*loss_flux
 
     # #Wronskian/Probability flux conservation loss
     # loss_wronskian = (1 - (1 + model.beta_re**2 + model.beta_im**2)/(model.alpha_re**2 + model.alpha_im**2 + 1e-8))**2
@@ -457,7 +457,7 @@ for epoch in range(Adam_iterations):
         plt.axhline(0.0, color = 'cyan', linestyle = '--', label = 'Target')
         plt.xlabel('x', fontsize = 25)
         plt.ylabel(r'Flux Residual', fontsize = 25)
-        plt.yscale('symlog')
+        # plt.yscale()
         plt.grid()
         plt.legend(fontsize = 15, loc = 'best')
         plt.tight_layout()
@@ -472,10 +472,10 @@ for epoch in range(Adam_iterations):
 print("Adam training complete. Switching to L-BFGS:", flush = True)
 
 
-lbfgs_optimiser = t.optim.LBFGS(model.parameters(), lr = 1.0, max_iter = 5,
+lbfgs_optimiser = t.optim.LBFGS(model.parameters(), lr = 1.0, max_iter = 20,
             history_size = 50, line_search_fn = 'strong_wolfe')
 
-lbfgs_iterations = 200
+lbfgs_iterations = 1000
 # lbfgs_weights = annealing(Adam_iterations, Adam_iterations)
 # N_points = 2*N_points
 N_uniform = int(0.6*N_points)
@@ -511,6 +511,10 @@ for epoch in range(lbfgs_iterations):
         return loss
 
     lbfgs_optimiser.step(closure)
+
+    with_grad = compute_loss(model, x_tensor_lbfgs, mass, mode, omega)
+    _, _, _, loss_now, lf_now, lo_now, lre, lim, *_ = with_grad
+    info.update({'total': loss_now.item(), 'flux': lf_now.item(), 'ode': lo_now.item(), 'loss_re': lre.item(), 'loss_im': lim.item()})
 
     # loss_h.append(info['h'])
     # loss_norm.append(info['norm'])
@@ -552,8 +556,8 @@ for epoch in range(lbfgs_iterations):
         plt.figure()
         plt.plot(x_plot[idx], plot_data['res_re'].flatten()[idx], color = 'blue', label = r'$\Re (Res_{ODE})$')
         plt.plot(x_plot[idx], plot_data['res_im'].flatten()[idx], color = 'green', label = r'$\Im (Res_{ODE})$')
-        plt.plot(x_plot[idx], plot_data['re_w'].flatten()[idx], color = 'orange', label = r'$\Re (w_{NN})$')
-        plt.plot(x_plot[idx], plot_data['im_w'].flatten()[idx], color = 'red', label = r'$\Im (w_{NN})$')
+        plt.plot(x_plot[idx], plot_data['re_w'].flatten()[idx], color = 'orange', label = r'$\Re (u_{NN})$')
+        plt.plot(x_plot[idx], plot_data['im_w'].flatten()[idx], color = 'red', label = r'$\Im (u_{NN})$')
         plt.xlabel('x', fontsize = 25)
         plt.ylabel('Residual', fontsize = 25)
         plt.grid()
@@ -582,7 +586,7 @@ for epoch in range(lbfgs_iterations):
         plt.axhline(0.0, color = 'cyan', linestyle = '--', label = 'Target')
         plt.xlabel('x', fontsize = 25)
         plt.ylabel(r'Flux Residual', fontsize = 25)
-        plt.yscale('symlog')
+        # plt.yscale('symlog')
         plt.grid()
         plt.legend(fontsize = 15, loc = 'best')
         plt.tight_layout()
