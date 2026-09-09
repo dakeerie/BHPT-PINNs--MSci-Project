@@ -116,7 +116,7 @@ for mode in modes:
             GBF = 1.0/(np.abs(alpha)**2)
             GBFs[mode].append(GBF)
             probs[mode].append(prob)
-            rows.append({'l': int(mode), 'omega':om, 'GBF': GBF, 'log10GBF': np.log10(GBF), 'prob': prob,
+            rows.append({'l': int(mode), 'omega': om, 'GBF': GBF, 'log10GBF': np.log10(GBF), 'prob': prob,
                     'alpha_re': alpha.real, 'alpha_im': alpha.imag, 'beta_re': beta.real, 'beta_im': beta.imag,
                     'x_end': x_end, 'r_end': 2*mass/(1 - x_end), 'rtol': 1e-7, 'success': bool(sol.success)})
 
