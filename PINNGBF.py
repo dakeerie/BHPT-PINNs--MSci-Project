@@ -230,7 +230,7 @@ def compute_loss(model, x_tensor, mass, mode, omega):
     loss_ode = loss_ode_re + loss_ode_im
 
     #Flux conservation
-    J = g(x_tensor, mass)*(u_re*du_im - u_im*du_re) - omega*(u_re**2 + u_im**2 - 1)
+    J = g(x_tensor, mass)*(u_re*du_im - u_im*du_re) - omega*(u_re**2 + u_im**2 - 1) # should = 0 analytically
     # det_scale = (omega*(det_u_re**2 + det_u_im**2 + 1.0))**2
     # loss_flux = t.mean(J**2/(det_scale + epsilon))
     loss_flux = t.mean(J**2)
@@ -431,6 +431,7 @@ for epoch in range(Adam_iterations):
         plt.plot(x_np[idx], u_im_plot[idx], color = 'red', label = r'$\Im (u_{NN})$')
         plt.xlabel('x', fontsize = 25)
         plt.ylabel('Output', fontsize = 25)
+        plt.title(f"l = {mode}, omega = {omega}", fontsize = 20)
         plt.grid()
         plt.legend(fontsize = 15, loc = 'best')
         plt.tight_layout()
@@ -446,6 +447,7 @@ for epoch in range(Adam_iterations):
         plt.yscale('log')
         plt.ylabel('Loss', fontsize = 25)
         plt.xlabel('Epoch', fontsize = 25)
+        plt.title(f"l = {mode}, omega = {omega}", fontsize = 20)
         plt.legend(fontsize = 15, loc = 'best')
         plt.grid()
         plt.tight_layout()
@@ -457,6 +459,7 @@ for epoch in range(Adam_iterations):
         plt.axhline(0.0, color = 'cyan', linestyle = '--', label = 'Target')
         plt.xlabel('x', fontsize = 25)
         plt.ylabel(r'Flux Residual', fontsize = 25)
+        plt.title(f"l = {mode}, omega = {omega}", fontsize = 20)
         # plt.yscale()
         plt.grid()
         plt.legend(fontsize = 15, loc = 'best')
@@ -560,6 +563,7 @@ for epoch in range(lbfgs_iterations):
         plt.plot(x_plot[idx], plot_data['im_w'].flatten()[idx], color = 'red', label = r'$\Im (u_{NN})$')
         plt.xlabel('x', fontsize = 25)
         plt.ylabel('Residual', fontsize = 25)
+        plt.title(f"l = {mode}, omega = {omega}", fontsize = 20)
         plt.grid()
         plt.legend(fontsize = 25, loc = 'best')
         plt.tight_layout()
@@ -575,6 +579,7 @@ for epoch in range(lbfgs_iterations):
         plt.yscale('log')
         plt.ylabel('Loss', fontsize = 25)
         plt.xlabel('Epoch', fontsize = 25)
+        plt.title(f"l = {mode}, omega = {omega}", fontsize = 20)
         plt.legend(fontsize = 15, loc = 'best')
         plt.grid()
         plt.tight_layout()
@@ -586,6 +591,7 @@ for epoch in range(lbfgs_iterations):
         plt.axhline(0.0, color = 'cyan', linestyle = '--', label = 'Target')
         plt.xlabel('x', fontsize = 25)
         plt.ylabel(r'Flux Residual', fontsize = 25)
+        plt.title(f"l = {mode}, omega = {omega}", fontsize = 20)
         # plt.yscale('symlog')
         plt.grid()
         plt.legend(fontsize = 15, loc = 'best')
@@ -644,7 +650,7 @@ ax2.axhline(1.0, color = 'red', linestyle = ':', linewidth = 1, label = r'Target
 
 lines1, labels1 = ax1.get_legend_handles_labels()
 lines2, labels2 = ax2.get_legend_handles_labels()
-ax1.legend(lines1 + lines2, labels1 + labels2, fontsize = 11, loc = 'lower left')
+ax1.legend(lines1 + lines2, labels1 + labels2, fontsize = 11, loc = 'best')
 plt.title(f'l = {mode}, omega = {omega}', fontsize = 16)
 plt.tight_layout()
 plt.savefig(f'{base_path}/GBFProb.png', format = 'png')
