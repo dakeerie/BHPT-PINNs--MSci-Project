@@ -5,6 +5,11 @@ from scipy.integrate import solve_ivp
 from Functions import *
 import csv
 import pickle
+import imageio.v2 as imageio
+import os
+import glob
+
+os.makedirs("./NumericalGBF", exist_ok = True)
 
 # plt.rcParams.update({
 #     "text.usetex": True,
@@ -17,7 +22,8 @@ import pickle
 # omega = np.linspace(0.01, 2.0, 30)
 
 modes = [2]
-omega = [0.01, 0.02, 0.03, 0.04, 0.05, 0.06, 0.07, 0.08, 0.09, 0.10, 0.20, 0.30, 0.40, 0.50, 0.60, 0.70, 0.80, 0.90, 1.00]
+omega = [0.01, 0.02, 0.03, 0.04, 0.05, 0.06, 0.07, 0.08, 0.09, 0.10, 0.20, 0.30, 
+        0.373, 0.40, 0.50, 0.60, 0.70, 0.747, 0.80, 0.90, 1.00, 1.10, 1.20, 1.30, 1.40]
 mass = 0.5
 
 RTOL = 1e-9
@@ -154,7 +160,7 @@ print("Solver successful. Plotting results...")
 omega_last = omega[-1]
 mode_last = modes[-1]
 
-sol_last = solutions[mode_last][omega_last]
+sol_last = solutions[2][0.01]
 x_last = sol_last.t
 u_last = sol_last.y[0] + 1j*sol_last.y[1]
 du_last = sol_last.y[2] + 1j*sol_last.y[3]
@@ -368,3 +374,90 @@ print("  solutions.pkl")
 print("  results.pkl")
 print("  convergence.pkl")
 print("  convergence_metadata.pkl")
+print()
+
+mode_gif = 2
+omega_gif = 0.70
+if omega_gif not in solutions[mode_gif]:
+    raise ValueError(f"omega = {omega_gif} is not available for l = {mode_gif}.")
+
+T = 2*np.pi/omega_gif
+t_vals = np.linspace(0, 10*T, 1000)
+sol_gif = solutions[2][omega_gif]
+x_gif = sol_gif.t
+u_gif = sol_gif.y[0] + 1j*sol_gif.y[1]
+alpha_gif = results[2][omega_gif]['alpha']
+r_gif = 2*mass/(1 - x_gif)
+r_max = 200
+mask = r_gif <= r_max
+rstar_gif = 2*mass/(1 - x_gif) + 2*mass*np.log(x_gif/(1 - x_gif))
+Psi = 1/alpha_gif*np.exp(-1j*omega_gif*rstar_gif)*u_gif
+phi_t = np.exp(-1j*omega_gif*t_vals)
+Psi_xt = np.outer(phi_t, Psi)
+u_xt = np.outer(phi_t, u_gif)
+
+Psi_mask = Psi_xt[:, mask]
+u_mask = u_xt[:, mask]
+r_plot = r_gif[mask]
+
+def create_frame(n, r, Psi, u):
+
+    plt.figure(figsize = [12, 6])
+    plt.suptitle(rf'$t/2M = {t_vals[n]/(2*mass):.1f}$', fontsize = 22, y=1.0)
+    plt.subplot(1, 2, 1)
+    plt.plot(r, Psi.real[n, :], color = 'red', label = r'$\Re(\Psi)$')
+    plt.plot(r, Psi.imag[n, :], color = 'darkblue', label = r'$\Im(\Psi)$')
+    plt.xlim(r.min(), r.max())
+    plt.ylim(-3, 3)
+    plt.xlabel(r'$r/2M$', fontsize = 22)
+    plt.ylabel(r'$\Psi$', fontsize = 22)
+    plt.axhline(0, color = 'k', linestyle = '--')
+    # plt.axvline(1.0, color = 'black', linewidth = 1.5, label = 'Event Horizon')
+    plt.title(r'Time evolution of $\Psi = T \exp{\left(-\text{i} \omega r_*\right)}u$', fontsize = 22)
+    plt.tick_params(axis='both', which = 'major', labelsize = 18)
+    plt.minorticks_on()
+    plt.grid(True, which = 'both')
+    plt.legend(fontsize = 18, loc = 'upper right')
+
+    plt.subplot(1, 2, 2)
+    plt.plot(r, u.real[n, :], color = 'red', label = r'$\Re(u)$')
+    plt.plot(r, u.imag[n, :], color = 'darkblue', label = r'$\Im(u)$')
+    plt.xlabel(r'$r/2M$', fontsize = 22)
+    plt.xlim(r.min(), r.max())
+    plt.ylim(-5, 5)
+    plt.axhline(0.0, color = 'k', linestyle = '--')
+    # plt.axvline(1.0, color = 'black', linewidth = 1.5, label = 'Event Horizon')
+    plt.tick_params(axis='both', which = 'major', labelsize = 20)
+    plt.minorticks_on()
+    plt.grid(True, which = 'both')
+    plt.ylabel(r'$u$', fontsize = 22)
+    plt.title(r'Time evolution of $u$', fontsize = 22)
+    plt.legend(fontsize = 18, loc = 'upper right')
+
+    plt.subplots_adjust(left = 0.08, right = 0.95, bottom = 0.15, top = 0.85, wspace = 0.25)
+    plt.savefig(f'./NumericalGBF/img_{n}.png', 
+                    transparent = False,  
+                    facecolor = 'white',
+                    )
+    plt.close()
+
+frames = []
+print("-"*60)
+print('Generating GIF...')
+print("-"*60)
+for i in range(0, len(t_vals)):
+    create_frame(i, r_plot, Psi_mask, u_mask)
+    image = imageio.imread(f'./NumericalGBF/img_{i}.png')
+    frames.append(image)
+imageio.mimsave(f'./NumericalGBF/Movie.gif', frames, fps = 10, loop=0)
+
+print()
+# deletes all frames in img dir
+print("Deleting temporary frames...")
+dir_path = "./NumericalGBF/"
+file_pattern = "img_*.png"
+file_paths = glob.glob(os.path.join(dir_path, file_pattern))
+for file_path in file_paths:
+    os.remove(file_path)
+
+print("GIF saved to NumericalGBF/Movie.gif")
