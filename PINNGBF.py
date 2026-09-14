@@ -17,6 +17,8 @@ plt.rcParams.update({
     "text.usetex": False
 })
 
+#Argument parser
+#mode is value of l, omega is value of omega and check is included to check system initialises correctly
 parser = argparse.ArgumentParser(description = "Train PINN for specific mode l")
 parser.add_argument('--mode', type = int, required = True, help = 'The value of l (mode)')
 parser.add_argument('--omega', type = float, required = True, help = 'Incident wave frequency')
@@ -26,16 +28,20 @@ args = parser.parse_args()
 mode = args.mode
 omega = args.omega
 
+# mode = 2
+# omega = 0.3
+
+#Global data type
 DTYPE = t.float64
 NP_DTYPE = np.float32 if DTYPE == t.float32 else np.float64
 
+#GPU capabilities
 device = t.device('cuda' if t.cuda.is_available() else 'cpu')
 t.set_num_threads(4)
 print(f"Using device: {device}", flush = True)
 
-#Save utilities
+#Make various directories for saving results
 base_path = f'./GBFData/l{mode}/omega{omega}'
-
 out_dir = os.path.join(base_path, 'NNOutput')
 loss_dir = os.path.join(base_path, 'Loss')
 flux_dir = os.path.join(base_path, 'Flux')
@@ -46,8 +52,7 @@ os.makedirs(loss_dir, exist_ok = True)
 os.makedirs(flux_dir, exist_ok = True)
 os.makedirs(final_plots_dir, exist_ok = True)
 
-# mode = 2
-# omega = 0.3
+#Set up domain and BH mass
 epsilon = 1e-8
 mass = 0.5
 x_max = 0.95 
@@ -58,7 +63,7 @@ rstar_max_tensor = t.tensor(rstar_max, requires_grad = True, dtype = DTYPE, devi
 # O = 4*mass*omega
 # L = mode*(mode + 1)
 
-#PINN architecture
+#Old activation functions
 # class cornell_adaptive_tanh(nn.Module):
 #     def __init__(self, num_features):
 #         super().__init__()
@@ -84,6 +89,8 @@ rstar_max_tensor = t.tensor(rstar_max, requires_grad = True, dtype = DTYPE, devi
 #     def forward(self, x):
 #         return t.sin(self.a*x)
 
+#Activation Function
+#Adaptive tanh function of the form (1 + beta*x)*tanh(n*a*x) where beta and a are trainable parameters
 class keerie_adaptive_tanh(nn.Module):
     def __init__(self, num_features, n = 10.0):
         super().__init__()
@@ -94,6 +101,7 @@ class keerie_adaptive_tanh(nn.Module):
     def forward(self, x):
         return (1 + self.beta*x)*t.tanh(self.n*self.a*x)
 
+#PINN architecture
 class Model(nn.Module):
     def __init__(self, in_channels, out_channels, hidden_channels, num_hidden_layers=2):
         super().__init__() 
@@ -119,9 +127,7 @@ class Model(nn.Module):
         x = self.output_layer(x) 
         return x 
 
-#Set up
-
-#Define functions
+#Define various functions
 #Derivative functions
 def grads(y, x):
         dy = t.autograd.grad(y, x, t.ones_like(y), create_graph = True)[0]
@@ -136,6 +142,7 @@ def eval_grad(y, x):
     return t.autograd.grad(y, x, t.ones_like(y), create_graph=False, retain_graph = True)[0]
 
 #ODE Coefficients
+#ODE of the form A(x)u'' + B(x)u' + C(x)u = 0 where primes denote derivatives wrt x
 def A(x):
     A = x*(1 - x)**2
     return A
@@ -153,13 +160,14 @@ def g(x, M):
     return x*(1 - x)**2/(2*M)
 
 #Coefficients obtained via Taylor expansion of u_1 at x = 0 (regular singular point)
-def taylor_coeffs(mass, omega, mode):
+def taylor_coeffs(mass, mode, omega):
     Lambda = mode*(mode + 1)
     Omega = 4*mass*omega
     c1 = (Lambda - 3)/(1 - 1j*Omega)
     c2 = ((Lambda + 1)*c1 + 3)/(4 - 1j*2*Omega)
     return c1.real, c1.imag, c2.real, c2.imag
-    
+
+#Old loss annealing code included for reference
 # def annealing(epoch, total_epochs):
 #     if epoch <= 0.1*total_epochs:
 #         BC = 100.0
@@ -187,8 +195,11 @@ def taylor_coeffs(mass, omega, mode):
     
 #     return [BC, AMPLITUDE, UMAX, UMAX_DERIV, ODE, WRON]
 
-def ansatz(model, x_tensor, mass, omega, mode):
-    c1_re, c1_im, c2_re, c2_im = taylor_coeffs(mass, omega, mode)
+#Ansatz for the wave-function u
+#Ansatz is of the form u(x) = 1 + c1*x + c2*x**2 + 100*(P + exp(2i*omega*r_star)*Q) 
+#where P and Q are complex with components corresponding to the four channel neural network output
+def ansatz(model, x_tensor, mass, mode, omega):
+    c1_re, c1_im, c2_re, c2_im = taylor_coeffs(mass, mode, omega)
     NN = model(x_tensor)
     P_re, P_im, Q_re, Q_im = NN[:, 0:1], NN[:, 1:2], NN[:, 2:3], NN[:, 3:4]
     x_safe = x_tensor.clamp(min = 1e-12, max = 1 - 1e-3)
@@ -199,14 +210,11 @@ def ansatz(model, x_tensor, mass, omega, mode):
     u_im = c1_im*x_tensor + c2_im*x_tensor**2 + 100.0*x_tensor**3*(P_im + Q_im*cs + Q_re*sn)
     return u_re, u_im, P_re, P_im, Q_re, Q_im
 
+#Current loss function composed of ODE residual and Flux conservation requirement
 def compute_loss(model, x_tensor, mass, mode, omega):
-    """weights: [weight_horizon, weight_amplitude, weight_umax, 
-    weight_umax_deriv, weight_ODE, weight_wronskian]
-    returns: Re(w_nn), Im(w_nn), total loss, horizon loss, amplitude loss, 
-    u boundary loss, u' boundary loss, ODE loss, Re(ODE loss), Im(ODE loss), wronskian loss"""
 
-    #Physics loss
-    u_re, u_im, P_re, P_im, Q_re, Q_im = ansatz(model, x_tensor, mass, omega)
+    #ODE residual
+    u_re, u_im, P_re, P_im, Q_re, Q_im = ansatz(model, x_tensor, mass, mode, omega)
     
     du_re, d2u_re = grads(u_re, x_tensor)
     du_im, d2u_im = grads(u_im, x_tensor)
@@ -218,32 +226,22 @@ def compute_loss(model, x_tensor, mass, mode, omega):
     res_ode_re = (A_*d2u_re + B_re*du_re - B_im*du_im + C_*u_re)
     res_ode_im = (A_*d2u_im + B_im*du_re + B_re*du_im + C_*u_im)
 
-    # det_d2u_re, det_d2u_im = d2u_re.detach(), d2u_im.detach()
-    # det_du_re, det_du_im = du_re.detach(), du_im.detach()
-    # det_u_re, det_u_im = u_re.detach(), u_im.detach()
-
-    # normalise = A_**2*(det_d2u_re**2 + det_d2u_im**2) + (B_re**2 + B_im**2)*(det_du_re**2 + det_du_im**2) + C_**2*(det_u_re**2 + det_u_im**2)
-
-    
-    # loss_ode_re = t.mean(res_ode_re**2/(normalise + epsilon))
-    # loss_ode_im = t.mean(res_ode_im**2/(normalise + epsilon))
     loss_ode_re = t.mean(res_ode_re**2)
     loss_ode_im = t.mean(res_ode_im**2)
     loss_ode = loss_ode_re + loss_ode_im
 
-    #Flux conservation
+    #Flux conservation- included to prevent the network from setting u = 0
     J = g(x_tensor, mass)*(u_re*du_im - u_im*du_re) - omega*(u_re**2 + u_im**2 - 1) # should = 0 analytically
-    # det_scale = (omega*(det_u_re**2 + det_u_im**2 + 1.0))**2
-    # loss_flux = t.mean(J**2/(det_scale + epsilon))
     loss_flux = t.mean(J**2)
 
+    #Loss annealing to be included
     total_loss = loss_ode + 10*loss_flux
-
-    # #Wronskian/Probability flux conservation loss
-    # loss_wronskian = (1 - (1 + model.beta_re**2 + model.beta_im**2)/(model.alpha_re**2 + model.alpha_im**2 + 1e-8))**2
 
     return u_re, u_im, J, total_loss, loss_flux, loss_ode, loss_ode_re, loss_ode_im, res_ode_re, res_ode_im, P_re, P_im, Q_re, Q_im
 
+#Calculates GBF via alpha = (u - u'/D)/(u1 - u1'/D) with D the log derivative of the u2 branch
+#u1 is obtained via an asymptotic expansion and u is the wavefunction the network approximates
+#See paper for full derivation (needs to be made more rigorous)
 def extraction(model, x_extraction, mass, mode, omega):
 
     L = mode*(mode + 1)
@@ -251,14 +249,16 @@ def extraction(model, x_extraction, mass, mode, omega):
     
     x_extraction_tensor = t.tensor(x_extraction, requires_grad = True, dtype = DTYPE, device = device).view(-1, 1) 
 
-    u_max_re, u_max_im, *_ = ansatz(model, x_extraction_tensor, mass, omega)
+    u_max_re, u_max_im, *_ = ansatz(model, x_extraction_tensor, mass, mode, omega)
 
+    #Eval grad used to prevent creation of a graph within the extraction function
     du_max_re  = eval_grad(u_max_re, x_extraction_tensor)
     du_max_im  = eval_grad(u_max_im, x_extraction_tensor)
 
     u_max = complex(u_max_re.item(), u_max_im.item())
     du_max = complex(du_max_re.item(), du_max_im.item())
 
+    #Compute more terms in expansion??
     a1 = -1j*L/Omega
     a2 = -(3 + (2 - L)*a1)/(1j*2*Omega)
 
@@ -272,7 +272,8 @@ def extraction(model, x_extraction, mass, mode, omega):
     denominator = u1 - du1/D
     alpha = numerator/denominator
     beta = (u_max - alpha*u1)/(np.exp(1j*2*omega*rstar_extraction)*np.conj(u1))
-        
+
+    #Not technically a probability but instead related to the Wronskian and flux conservation at the extraction point
     prob = np.abs(alpha)**2 - np.abs(beta)**2
     gbf = 1/np.abs(alpha)**2
 
@@ -282,6 +283,7 @@ print('-'*30, flush = True)
 print(f'Starting training for l = {mode} with omega = {omega}', flush = True)
 print('-'*30, flush = True)
 
+#Output arrays
 hist_total = []
 hist_flux = []
 hist_ode = []
@@ -293,8 +295,10 @@ alphas = []
 betas = []
 extraction_epochs = []
 
+#Setup PINN logistics
 N_points = 10000
 learning_rate = 1e-3
+#Seed included for reproducibility
 t.manual_seed(0)
 model = Model(1, 4, 32, num_hidden_layers = 3).to(device = device, dtype = DTYPE)
 
@@ -302,14 +306,16 @@ adam_parameters = model.parameters()
 
 optimiser = optim.Adam(adam_parameters, lr = learning_rate)
 
+#Initialisation check 
 if args.check:
+    c1_re, c1_im, *_ = taylor_coeffs(mass, mode, omega)
     print('\n' + '='*60, flush = True)
     print('Running preliminary test:', flush = True)
     print('='*60, flush = True)
 
     print('\n Ansatz finite everywhere?', flush = True)
     xs = t.tensor([[1e-10], [1e-6], [1e-3], [0.5], [x_max]], dtype = DTYPE, device = device, requires_grad = True)
-    u_re, u_im, P_re, P_im, Q_re, Q_im = ansatz(model, xs, mass, omega)
+    u_re, u_im, P_re, P_im, Q_re, Q_im = ansatz(model, xs, mass, mode, omega)
     print(f"{'x':>12}{'u_re':>16}{'u_im':>16}", flush = True)
     for i, xv in enumerate(xs.flatten().tolist()):
         print(f"{xv:>12.1e}{u_re[i, 0].item():>16.8f}{u_im[i, 0].item():>16.8f}", flush = True)
@@ -318,7 +324,7 @@ if args.check:
     print('\n Horizon constraint check:', flush = True)
     for h in (1e-5, 1e-6, 1e-7):
         xh = t.tensor([[h]], dtype = DTYPE, device = device)
-        a, b, *_ = ansatz(model, xh, mass, omega)
+        a, b, *_ = ansatz(model, xh, mass, mode, omega)
         print(f"    eps = {h:.0e}: (u_re - 1)/eps = {(a.item() - 1)/h:>12.6f}"
               f"                             u_im/eps = {b.item()/h:>12.6f}", flush = True)
     print(f"    target c1 = {c1_re:>12.6f}                                                                    {c1_im:>12.6f}", flush = True)
@@ -326,13 +332,13 @@ if args.check:
     print("\n Autograd chain check via finite difference:", flush = True)
     x0, dh = 0.5, 1e-6
     xg = t.tensor([[x0]], dtype = DTYPE, device = device, requires_grad = True)
-    ur, ui, *_ = ansatz(model, xg, mass, omega)
+    ur, ui, *_ = ansatz(model, xg, mass, mode, omega)
     dur, _ = grads(ur, xg); dui, _ = grads(ui, xg)
     with t.no_grad():
         xp = t.tensor([[x0 + dh]], dtype = DTYPE, device = device)
         xm = t.tensor([[x0 - dh]], dtype = DTYPE, device = device)
-        up_re, up_im, *_ = ansatz(model, xp, mass, omega)
-        um_re, um_im, *_ = ansatz(model, xm, mass, omega)
+        up_re, up_im, *_ = ansatz(model, xp, mass, mode, omega)
+        um_re, um_im, *_ = ansatz(model, xm, mass, mode, omega)
     fd_re = (up_re.item() - um_re.item())/(2*dh)
     fd_im = (up_im.item() - um_im.item())/(2*dh)
     print(f'     du/dx at x = {x0}: autograd {dur.item():>12.6f} {dui.item():>12.6f}', flush = True)
@@ -368,14 +374,15 @@ if args.check:
     print("Preliminary test passed!", flush = True)
     print('='*60, flush = True)
     raise SystemExit(0)
-        
-        
+
+#Adam training loop
 Adam_iterations = 18000
 for epoch in range(Adam_iterations):
     optimiser.zero_grad(set_to_none = True)
     N_uniform = int(0.6*N_points)
     x_uniform = x_max*t.rand((N_uniform, 1), dtype = DTYPE, device = device)
 
+    #Sample points closer to the boundaries
     N_edges = N_points - N_uniform
     r_h, r_far = 2*mass, 2*mass/(1 - x_max)
     r_samp = r_h + (r_far - r_h)*t.rand((N_edges, 1), dtype = DTYPE, device = device)
@@ -385,17 +392,20 @@ for epoch in range(Adam_iterations):
     x_tensor.requires_grad_(True)
 
     # loss_weights = annealing(epoch, Adam_iterations)
-    Re_u_nn, Im_u_nn, flux_res, loss, loss_f, loss_o, loss_ode_real, loss_ode_imag, res_ode_re, res_ode_im, P_re, P_im, Q_re, Q_im = compute_loss(model, x_tensor, mass, mode, omega)
+    (Re_u_nn, Im_u_nn, flux_res, loss, loss_f, loss_o, loss_ode_real, loss_ode_imag, 
+    res_ode_re, res_ode_im, P_re, P_im, Q_re, Q_im) = compute_loss(model, x_tensor, mass, mode, omega)
 
     loss.backward()
     optimiser.step()
-    
+
+    #Save outputs
     hist_total.append(loss.item())
     hist_flux.append(loss_f.item())
     hist_ode.append(loss_o.item())
     hist_ode_re.append(loss_ode_real.item())
     hist_ode_im.append(loss_ode_imag.item())
 
+    #Printing
     if (epoch + 1) % 100 == 0 or epoch == 0 or epoch == (Adam_iterations - 1):
         extraction_epochs.append(epoch)
         alpha, beta, prob, gbf = extraction(model, x_max, mass, mode, omega)
@@ -416,6 +426,7 @@ for epoch in range(Adam_iterations):
                     """, flush = True)
             print("-"*30, flush = True)
 
+    #Plotting
     if (epoch + 1) % 1000 == 0:
         x_np = x_tensor.cpu().detach().numpy().flatten()
         idx = np.argsort(x_np)
@@ -469,14 +480,14 @@ for epoch in range(Adam_iterations):
         plt.savefig(f'{flux_dir}/Flux_Residual_Epoch_{epoch + 1}.png', format = 'png')
         plt.close()
 
-
+        #Save current checkpoint in case of a crash or blow up 
         t.save({'model_state_dict': model.state_dict(), 'epoch': epoch,
                     'GBF': GBF, 'probability': probability},
         os.path.join(base_path, 'checkpoint_latest.pth'))
 
 print("Adam training complete. Switching to L-BFGS:", flush = True)
 
-
+#Initialise L-BFGS optimiser
 lbfgs_optimiser = t.optim.LBFGS(model.parameters(), lr = 1.0, max_iter = 20,
             history_size = 50, line_search_fn = 'strong_wolfe')
 
@@ -494,6 +505,7 @@ x_edges = 1 - 2*mass/r_samp
 x_tensor_lbfgs = t.cat([x_uniform, x_edges], dim = 0)
 x_tensor_lbfgs.requires_grad_(True)
 
+#L-BFGS training
 for epoch in range(lbfgs_iterations):
     info = {'total': 0, 'flux': 0, 'ode': 0, 'loss_re': 0, 'loss_im': 0, 'res_re': 0, 'res_im': 0}
     plot_data = {}
@@ -531,7 +543,8 @@ for epoch in range(lbfgs_iterations):
     if not np.isfinite(info['total']):
         print(f"L-BFGS diverged at epoch {epoch}; stopping.", flush=True)
         break
-    
+
+    #Saving output
     hist_total.append(info['total'])
     hist_flux.append(info['flux'])
     hist_ode.append(info['ode'])
@@ -539,7 +552,7 @@ for epoch in range(lbfgs_iterations):
     hist_ode_im.append(info['loss_im'])
 
     if (epoch + 1) % 20 == 0 or epoch == (lbfgs_iterations - 1):
-
+        #Printing and plotting
         extraction_epochs.append(epoch + Adam_iterations)
         alpha, beta, prob, gbf = extraction(model, x_max, mass, mode, omega)
         alphas.append(alpha)
@@ -607,8 +620,7 @@ for epoch in range(lbfgs_iterations):
 
 
 r_plot = 2*mass/(1 - x_plot)
-
-
+#Final plots after training
 plt.figure()
 plt.subplot(1, 2, 1)
 plt.plot(x_plot[idx], plot_data['P_re'].flatten()[idx], label = 'Re(P)')
@@ -732,8 +744,7 @@ ax1.tick_params(axis = 'y')
 ax1.grid(alpha = 0.3)
 
 ax2 = ax1.twinx()
-ax2.plot(extraction_epochs, probability, color = 'red',
-         label = r'$|\alpha|^2 - |\beta|^2$')
+ax2.plot(extraction_epochs, probability, color = 'red', label = r'$|\alpha|^2 - |\beta|^2$')
 ax2.set_ylabel(r'$|\alpha|^2 - |\beta|^2$', fontsize = 16)
 ax2.tick_params(axis = 'y')
 ax2.axhline(1.0, color = 'red', linestyle = ':', linewidth = 1, label = r'Target $|\alpha|^2 - |\beta|^2$')
@@ -746,6 +757,7 @@ plt.tight_layout()
 plt.savefig(f'{final_plots_dir}/GBFProb.png', format = 'png')
 plt.close()
 
+#Save histories, outputs and network model
 results = {
     'model_state_dict': model.state_dict(),
     'alpha_history': {'re': alpha_real_array, 'im': alpha_imag_array},
@@ -781,7 +793,7 @@ with open(result_file_path, 'w') as f:
     f.write(f"Prob = {final_prob:.10f}\n")
     f.write(f"GBF = {final_gbf:.10e}\n")
 
-
+#Final print
 print(f'Training complete. Checkpoint saved to {checkpoint_path}', flush = True)
 print(f"l = {mode} mode with omega = {omega} completed successfully.", flush = True)
 print(f"""Final values:
