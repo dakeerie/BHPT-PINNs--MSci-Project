@@ -39,10 +39,12 @@ base_path = f'./GBFData/l{mode}/omega{omega}'
 out_dir = os.path.join(base_path, 'NNOutput')
 loss_dir = os.path.join(base_path, 'Loss')
 flux_dir = os.path.join(base_path, 'Flux')
+final_plots_dir = os.path.join(base_path, 'FinalPlots')
 os.makedirs(base_path, exist_ok=True)
 os.makedirs(out_dir, exist_ok = True)
 os.makedirs(loss_dir, exist_ok = True)
 os.makedirs(flux_dir, exist_ok = True)
+os.makedirs(final_plots_dir, exist_ok = True)
 
 # mode = 2
 # omega = 0.3
@@ -157,8 +159,7 @@ def taylor_coeffs(mass, omega, mode):
     c1 = (Lambda - 3)/(1 - 1j*Omega)
     c2 = ((Lambda + 1)*c1 + 3)/(4 - 1j*2*Omega)
     return c1.real, c1.imag, c2.real, c2.imag
-
-c1_re, c1_im, c2_re, c2_im = taylor_coeffs(mass, omega, mode)
+    
 # def annealing(epoch, total_epochs):
 #     if epoch <= 0.1*total_epochs:
 #         BC = 100.0
@@ -186,7 +187,8 @@ c1_re, c1_im, c2_re, c2_im = taylor_coeffs(mass, omega, mode)
     
 #     return [BC, AMPLITUDE, UMAX, UMAX_DERIV, ODE, WRON]
 
-def ansatz(model, x_tensor, mass, omega):
+def ansatz(model, x_tensor, mass, omega, mode):
+    c1_re, c1_im, c2_re, c2_im = taylor_coeffs(mass, omega, mode)
     NN = model(x_tensor)
     P_re, P_im, Q_re, Q_im = NN[:, 0:1], NN[:, 1:2], NN[:, 2:3], NN[:, 3:4]
     x_safe = x_tensor.clamp(min = 1e-12, max = 1 - 1e-3)
@@ -204,7 +206,7 @@ def compute_loss(model, x_tensor, mass, mode, omega):
     u boundary loss, u' boundary loss, ODE loss, Re(ODE loss), Im(ODE loss), wronskian loss"""
 
     #Physics loss
-    u_re, u_im, *_ = ansatz(model, x_tensor, mass, omega)
+    u_re, u_im, P_re, P_im, Q_re, Q_im = ansatz(model, x_tensor, mass, omega)
     
     du_re, d2u_re = grads(u_re, x_tensor)
     du_im, d2u_im = grads(u_im, x_tensor)
@@ -240,7 +242,7 @@ def compute_loss(model, x_tensor, mass, mode, omega):
     # #Wronskian/Probability flux conservation loss
     # loss_wronskian = (1 - (1 + model.beta_re**2 + model.beta_im**2)/(model.alpha_re**2 + model.alpha_im**2 + 1e-8))**2
 
-    return u_re, u_im, J, total_loss, loss_flux, loss_ode, loss_ode_re, loss_ode_im, res_ode_re, res_ode_im
+    return u_re, u_im, J, total_loss, loss_flux, loss_ode, loss_ode_re, loss_ode_im, res_ode_re, res_ode_im, P_re, P_im, Q_re, Q_im
 
 def extraction(model, x_extraction, mass, mode, omega):
 
@@ -383,7 +385,7 @@ for epoch in range(Adam_iterations):
     x_tensor.requires_grad_(True)
 
     # loss_weights = annealing(epoch, Adam_iterations)
-    Re_u_nn, Im_u_nn, flux_res, loss, loss_f, loss_o, loss_ode_real, loss_ode_imag, res_ode_re, res_ode_im = compute_loss(model, x_tensor, mass, mode, omega)
+    Re_u_nn, Im_u_nn, flux_res, loss, loss_f, loss_o, loss_ode_real, loss_ode_imag, res_ode_re, res_ode_im, P_re, P_im, Q_re, Q_im = compute_loss(model, x_tensor, mass, mode, omega)
 
     loss.backward()
     optimiser.step()
@@ -499,17 +501,21 @@ for epoch in range(lbfgs_iterations):
     def closure():
         lbfgs_optimiser.zero_grad(set_to_none = True)
 
-        Re_u_nn, Im_u_nn, flux_res, loss, loss_f, loss_o, loss_ode_re, loss_ode_im, res_ode_re, res_ode_im = compute_loss(model, x_tensor_lbfgs, mass, mode, omega)       
+        Re_u_nn, Im_u_nn, flux_res, loss, loss_f, loss_o, loss_ode_re, loss_ode_im, res_ode_re, res_ode_im, P_re, P_im, Q_re, Q_im = compute_loss(model, x_tensor_lbfgs, mass, mode, omega)       
         loss.backward()
 
         info.update({'total': loss.item(), 'flux': loss_f.item(), 'ode': loss_o.item(), 'loss_re': loss_ode_re.item(), 'loss_im': loss_ode_im.item()})
 
         plot_data['x'] = x_tensor_lbfgs.cpu().detach().numpy()
-        plot_data['re_w'] = Re_u_nn.cpu().detach().numpy()
-        plot_data['im_w'] = Im_u_nn.cpu().detach().numpy()
+        plot_data['re_u'] = Re_u_nn.cpu().detach().numpy()
+        plot_data['im_u'] = Im_u_nn.cpu().detach().numpy()
         plot_data['flux'] = flux_res.cpu().detach().numpy()
         plot_data['res_re'] = res_ode_re.cpu().detach().numpy()
         plot_data['res_im'] = res_ode_im.cpu().detach().numpy()
+        plot_data['P_re'] = P_re.cpu().detach().numpy()
+        plot_data['P_im'] = P_im.cpu().detach().numpy()
+        plot_data['Q_re'] = Q_re.cpu().detach().numpy()
+        plot_data['Q_im'] = Q_im.cpu().detach().numpy()
 
         return loss
 
@@ -559,10 +565,10 @@ for epoch in range(lbfgs_iterations):
         plt.figure()
         plt.plot(x_plot[idx], plot_data['res_re'].flatten()[idx], color = 'blue', label = r'$\Re (Res_{ODE})$')
         plt.plot(x_plot[idx], plot_data['res_im'].flatten()[idx], color = 'green', label = r'$\Im (Res_{ODE})$')
-        plt.plot(x_plot[idx], plot_data['re_w'].flatten()[idx], color = 'orange', label = r'$\Re (u_{NN})$')
-        plt.plot(x_plot[idx], plot_data['im_w'].flatten()[idx], color = 'red', label = r'$\Im (u_{NN})$')
+        plt.plot(x_plot[idx], plot_data['re_u'].flatten()[idx], color = 'orange', label = r'$\Re (u_{NN})$')
+        plt.plot(x_plot[idx], plot_data['im_u'].flatten()[idx], color = 'red', label = r'$\Im (u_{NN})$')
         plt.xlabel('x', fontsize = 25)
-        plt.ylabel('Residual', fontsize = 25)
+        plt.ylabel('Output', fontsize = 25)
         plt.title(f"l = {mode}, omega = {omega}", fontsize = 20)
         plt.grid()
         plt.legend(fontsize = 25, loc = 'best')
@@ -599,6 +605,90 @@ for epoch in range(lbfgs_iterations):
         plt.savefig(f'{flux_dir}/Flux_Residual_Epoch_{epoch + 1 + Adam_iterations}.png', format = 'png')
         plt.close()
 
+
+r_plot = 2*mass/(1 - x_plot)
+
+
+plt.figure()
+plt.subplot(1, 2, 1)
+plt.plot(x_plot[idx], plot_data['P_re'].flatten()[idx], label = 'Re(P)')
+plt.plot(x_plot[idx], plot_data['P_im'].flatten()[idx], label = 'Im(P)')
+plt.plot(x_plot[idx], plot_data['Q_re'].flatten()[idx], label = 'Re(Q)')
+plt.plot(x_plot[idx], plot_data['Q_im'].flatten()[idx], label = 'Im(Q)')
+plt.xlabel('x', fontsize = 20)
+plt.ylabel('P and Q', fontsize = 20)
+plt.title('Direct Neural Network Output vs. x', fontsize = 21)
+plt.legend()
+plt.grid()
+plt.tight_layout()
+
+plt.figure()
+plt.subplot(1, 2, 2)
+plt.plot(r_plot[idx], plot_data['P_re'].flatten()[idx], label = 'Re(P)')
+plt.plot(r_plot[idx], plot_data['P_im'].flatten()[idx], label = 'Im(P)')
+plt.plot(r_plot[idx], plot_data['Q_re'].flatten()[idx], label = 'Re(Q)')
+plt.plot(r_plot[idx], plot_data['Q_im'].flatten()[idx], label = 'Im(Q)')
+plt.xlabel('r', fontsize = 20)
+plt.ylabel('P and Q', fontsize = 20)
+plt.title('Direct Neural Network Output vs. r', fontsize = 21)
+plt.legend()
+plt.grid()
+plt.tight_layout()
+
+plt.savefig(f'{final_plots_dir}/PQ.png', format = 'png')
+plt.close()
+
+plt.figure()
+plt.subplot(1, 2, 1)
+plt.plot(x_plot[idx], plot_data['re_u'].flatten()[idx], color = 'orange', label = r'$\Re (u_{NN})$')
+plt.plot(x_plot[idx], plot_data['im_u'].flatten()[idx], color = 'red', label = r'$\Im (u_{NN})$')
+plt.xlabel('x', fontsize = 20)
+plt.ylabel(r'$u(x) = c_1x + c_2 x^2 + 100x^3(P + \exp{\left(2 \text{i} \omega r_*\right)Q}$', fontsize = 20)
+plt.title('Wave function u'
+          '\n'
+          'Built via ansatz of NN output (P and Q)', fontsize = 21)
+plt.legend()
+plt.grid()
+plt.tight_layout()
+
+plt.subplot(1, 2, 2)
+plt.plot(r_plot[idx], plot_data['re_u'].flatten()[idx], color = 'orange', label = r'$\Re (u_{NN})$')
+plt.plot(r_plot[idx], plot_data['im_u'].flatten()[idx], color = 'red', label = r'\Im (u_{NN})$')
+plt.xlabel('r', fontsize = 20)
+plt.ylabel('u(r)', fontsize = 20)
+plt.legend()
+plt.grid()
+plt.tight_layout()
+
+plt.savefig(f'{final_plots_dir}/u.png', format = 'png')
+plt.close()
+
+plt.figure()
+plt.subplot(1, 2, 1)
+plt.plot(x_plot[idx], plot_data['res_re'].flatten()[idx], label = 'Re(res)')
+plt.plot(x_plot[idx], plot_data['res_im'].flatten()[idx], label = 'Im(res)')
+plt.xlabel('x', fontsize = 20)
+plt.ylabel('Residual', fontsize = 20)
+plt.title('ODE residual vs. x', fontsize = 21)
+plt.legend()
+plt.grid()
+plt.tight_layout()
+
+plt.figure()
+plt.subplot(1, 2, 2)
+plt.plot(r_plot[idx], plot_data['res_re'].flatten()[idx], label = 'Re(res)')
+plt.plot(r_plot[idx], plot_data['res_im'].flatten()[idx], label = 'Im(res)')
+plt.xlabel('r', fontsize = 20)
+plt.ylabel('Residual', fontsize = 20)
+plt.title('ODE residual vs. r', fontsize = 21)
+plt.legend()
+plt.grid()
+plt.tight_layout()
+
+plt.savefig(f'{final_plots_dir}/Residuals.png', format = 'png')
+plt.close()
+
+
 alphas = np.array(alphas)
 alpha_real_array, alpha_imag_array = alphas.real, alphas.imag
 betas = np.array(betas)
@@ -614,7 +704,7 @@ plt.title(f'l = {mode}, omega = {omega}', fontsize = 18)
 plt.tight_layout()
 plt.grid()
 plt.legend()
-plt.savefig(f'{base_path}/alpha_convergence.png', format = 'png')
+plt.savefig(f'{final_plots_dir}/alpha_convergence.png', format = 'png')
 plt.close()
 
 plt.figure(figsize = [7, 7])
@@ -627,7 +717,7 @@ plt.title(f'l = {mode}, omega = {omega}', fontsize = 18)
 plt.tight_layout()
 plt.grid()
 plt.legend()
-plt.savefig(f'{base_path}/beta_convergence.png', format = 'png')
+plt.savefig(f'{final_plots_dir}/beta_convergence.png', format = 'png')
 plt.close()
 
 fig, ax1 = plt.subplots(figsize = [7, 4.5])
@@ -653,7 +743,7 @@ lines2, labels2 = ax2.get_legend_handles_labels()
 ax1.legend(lines1 + lines2, labels1 + labels2, fontsize = 11, loc = 'best')
 plt.title(f'l = {mode}, omega = {omega}', fontsize = 16)
 plt.tight_layout()
-plt.savefig(f'{base_path}/GBFProb.png', format = 'png')
+plt.savefig(f'{final_plots_dir}/GBFProb.png', format = 'png')
 plt.close()
 
 results = {
@@ -676,6 +766,10 @@ R = final_beta/final_alpha
 
 result_file_path = os.path.join(base_path, 'result.txt')
 with open(result_file_path, 'w') as f:
+    f.write(f"l = {int(mode)}")
+    f.write(f"omega = {omega}")
+    f.write(f"final ODE loss = {info['ode']:.4e}")
+    f.write(f"final flux loss = {info['flux']:.4e}")
     f.write(f"alpha_re = {final_alpha.real:.10f}\n")
     f.write(f"alpha_im = {final_alpha.imag:.10f}\n")
     f.write(f"beta_re = {final_beta.real:.10f}\n")
