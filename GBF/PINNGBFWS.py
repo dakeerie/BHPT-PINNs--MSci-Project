@@ -7,8 +7,8 @@ import torch.nn.functional as F
 import torch.distributions as dist
 import os
 import argparse
+from Functions import *
 from matplotlib import rc
-
 
 plt.rcParams.update({
     "font.family": "serif",
