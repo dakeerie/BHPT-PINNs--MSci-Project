@@ -290,7 +290,7 @@ for step_idx, omega in enumerate(omega_schedule):
     os.makedirs(final_plots_dir, exist_ok = True)
 
     print("="*60, flush = True)
-    print(f"WS step {step_idx + 1} / {len(omega_schedule)} | l= {mode}, omega = {omega:.4f}", flush = True)
+    print(f"WS step {step_idx + 1} / {len(omega_schedule)} | l = {mode}, omega = {omega:.4f}", flush = True)
     print("="*60, flush = True)
 
     learning_rate = 1e-3
@@ -344,8 +344,7 @@ for step_idx, omega in enumerate(omega_schedule):
                             Current value of alpha: {alpha.real:.5f} + {alpha.imag:.5f}i,
                             Current value of beta: {beta.real:.5f} + {beta.imag:.5f}i,
                             Current value of |alpha|^2 - |beta|^2: {prob},
-                            Current value of GBF: {gbf}.
-                            """, flush = True)
+                            Current value of GBF: {gbf}.""", flush = True)
                     print("-"*60, flush = True)
 
         if (epoch + 1) % 1000 == 0:
@@ -473,8 +472,7 @@ for step_idx, omega in enumerate(omega_schedule):
                             Current value of alpha: {alpha.real:.5f} + {alpha.imag:.5f}i,
                             Current value of beta: {beta.real:.5f} + {beta.imag:.5f}i,
                             Current value of |alpha|^2 - |beta|^2: {prob},
-                            Current value of GBF: {gbf}.
-                            """, flush = True)
+                            Current value of GBF: {gbf}.""", flush = True)
                 print("-"*60, flush = True)
 
                 x_plot = plot_data['x'].flatten()
