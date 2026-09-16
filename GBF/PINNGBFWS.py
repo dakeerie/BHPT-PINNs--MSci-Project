@@ -190,7 +190,7 @@ def annealing(epoch, total_epochs):
     lambda_initial = 10.0
     lambda_final = 1.0
 
-    progress = epoch/(adam_iterations - 1)
+    progress = epoch/(total_epochs - 1)
     lambda_flux = lambda_final + 0.5*(lambda_initial - lambda_final)*(1 + np.cos(np.pi*progress))
     return lambda_flux
 
@@ -283,6 +283,7 @@ def extraction(model, x_extraction, mass, mode, omega):
 #Seed included for reproducibility
 t.manual_seed(0)
 model = Model(1, 4, 32, num_hidden_layers = 3).to(device = device, dtype = DTYPE)
+GBF_global = []
 
 for step_idx, omega in enumerate(omega_schedule):
     omega = float(omega)
@@ -308,7 +309,7 @@ for step_idx, omega in enumerate(omega_schedule):
     adam_iterations = 18000 if step_idx == 0 else 10000
     lbfgs_iterations = 1000 if step_idx == 0 else 800
 
-    hist_total, hist_flux, hist_ode, hist_ode_re, hist_ode_im = [], [], [], [], []
+    hist_total, hist_flux, hist_ode, hist_ode_re, hist_ode_im, hist_weight = [], [], [], [], [], []
     GBF, probability, alphas, betas, extraction_epochs = [], [], [], [], []
     N_points = 10000
 
@@ -325,9 +326,10 @@ for step_idx, omega in enumerate(omega_schedule):
 
         x_tensor = t.cat([x_uniform, x_edges], dim = 0).requires_grad_(True)
 
-        weight = annealing(epoch, adam_iterations)
+        flux_weight = annealing(epoch, adam_iterations)
+        hist_weight.append(flux_weight)
         (Re_u_nn, Im_u_nn, flux_res, loss, loss_f, loss_o, 
-        loss_ode_real, loss_ode_imag, res_ode_re, res_ode_im, P_re, P_im, Q_re, Q_im) = compute_loss(model, x_tensor, mass, mode, omega, weight)
+        loss_ode_real, loss_ode_imag, res_ode_re, res_ode_im, P_re, P_im, Q_re, Q_im) = compute_loss(model, x_tensor, mass, mode, omega, flux_weight)
 
         loss.backward()
         optimiser.step()
@@ -415,6 +417,15 @@ for step_idx, omega in enumerate(omega_schedule):
                             'GBF': GBF, 'probability': probability},
                 os.path.join(base_path, 'checkpoint_latest.pth'))
 
+    plt.figure()
+    plt.plot(hist_weight)
+    plt.xlabel('Epoch')
+    plt.ylabel(r'$\lambda_{\mathrm{flux}}$')
+    plt.grid()
+    plt.tight_layout()
+    plt.savefig(f'{base_path}/FluxWeights.png', format = 'png')
+    plt.close()
+
     print("Adam training complete. Switching to L-BFGS:", flush = True)
     print("="*60)
     lbfgs_optimiser = optim.LBFGS(model.parameters(), lr = 1.0, max_iter = 20,  history_size = 50, line_search_fn = "strong_wolfe")
@@ -430,7 +441,7 @@ for step_idx, omega in enumerate(omega_schedule):
     x_tensor_lbfgs = t.cat([x_uniform, x_edges], dim = 0)
     x_tensor_lbfgs.requires_grad_(True)
 
-    weight = annealing(adam_iterations, adam_iterations)
+    flux_weight = annealing(adam_iterations, adam_iterations)
 
     for epoch in range(lbfgs_iterations):
         info = {'total': 0, 'flux': 0, 'ode': 0, 'loss_re': 0, 'loss_im': 0, 'res_re': 0, 'res_im': 0}
@@ -439,7 +450,7 @@ for step_idx, omega in enumerate(omega_schedule):
         def closure():
             lbfgs_optimiser.zero_grad(set_to_none = True)
             (Re_u_nn, Im_u_nn, flux_res, loss, loss_f, loss_o, loss_ode_re, loss_ode_im,
-            res_ode_re, res_ode_im, P_re, P_im, Q_re, Q_im) = compute_loss(model, x_tensor_lbfgs, mass, mode, omega, weight)
+            res_ode_re, res_ode_im, P_re, P_im, Q_re, Q_im) = compute_loss(model, x_tensor_lbfgs, mass, mode, omega, flux_weight)
             loss.backward()
 
             info.update({'total': loss.item(), 'flux': loss_f.item(), 'ode': loss_o.item(), 'loss_re': loss_ode_re.item(), 'loss_im': loss_ode_im.item()})
@@ -459,7 +470,7 @@ for step_idx, omega in enumerate(omega_schedule):
 
         lbfgs_optimiser.step(closure)
 
-        with_grad = compute_loss(model, x_tensor_lbfgs, mass, mode, omega)
+        with_grad = compute_loss(model, x_tensor_lbfgs, mass, mode, omega, flux_weight)
         _, _, _, loss_now, lf_now, lo_now, lre, lim, *_ = with_grad
         info.update({'total': loss_now.item(), 'flux': lf_now.item(), 'ode': lo_now.item(), 'loss_re': lre.item(), 'loss_im': lim.item()})
 
@@ -681,6 +692,7 @@ for step_idx, omega in enumerate(omega_schedule):
     print("="*60)
 
     final_alpha, final_beta, final_prob, final_gbf = extraction(model, x_max, mass, mode, omega)
+    GBF_global.append(final_gbf)
     T = 1/final_alpha
     R = final_beta/final_alpha
 
@@ -708,3 +720,15 @@ t.save(results, checkpoint_path)
 
 print(f'WS training complete. Checkpoint saved to {checkpoint_path}', flush = True)
 print(f"l = {mode} mode training completed successfully.", flush = True)
+
+plt.figure(figsize = [6,4])
+plt.plot(omega_schedule, GBF_global, 'o-', color = 'red', label = 'Grey-body Factor')
+plt.xlabel(r'$\omega$', fontsize = 16)
+plt.ylabel(r'$\Gamma \left(\omega \right)$', fontsize = 16)
+plt.title(f'The Grey-Body Factor for l = {mode}'
+        "\n"
+        "Obtained via PINN")
+plt.grid()
+plt.legend()
+plt.savefig(f"./GBFWSData/l{mode}/GreyBodyFactor.png", format = 'png')
+plt.close()
