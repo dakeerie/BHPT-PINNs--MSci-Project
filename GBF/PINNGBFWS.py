@@ -23,7 +23,6 @@ parser.add_argument('--mode', type = int, required = True, help = 'The value of 
 parser.add_argument('--omega_start', type = float, default = 0.3, help = 'Initial (higher) frequency')
 parser.add_argument('--omega_final', type = float, default = 0.03, help = 'Final (lower) frequency')
 parser.add_argument('--num_steps', type = int, default = 10, help = "Number of warm-start steps")
-parser.add_argument('--check', action = 'store_true', help = 'Run a quick sanity check and exit without training')
 
 args = parser.parse_args()
 mode = args.mode
@@ -158,34 +157,7 @@ def taylor_coeffs(mass, mode, omega):
     c2 = ((Lambda + 1)*c1 + 3)/(4 - 1j*2*Omega)
     return c1.real, c1.imag, c2.real, c2.imag
 
-#Old loss annealing code included for reference
-# def annealing(epoch, total_epochs):
-#     if epoch <= 0.1*total_epochs:
-#         BC = 100.0
-#         AMPLITUDE = 100.0
-#         UMAX = 10.0
-#         UMAX_DERIV = 10.0
-#         ODE = 0.1
-#         WRON = 0.1
-
-#     elif 0.1*total_epochs < epoch < 0.6*total_epochs:
-#         BC = 100.0
-#         AMPLITUDE = 100.0
-#         UMAX = (50.0 - 10.0)/(0.6 - 0.1)*(epoch/total_epochs) + 2
-#         UMAX_DERIV = (50.0 - 10.0)/(0.6 - 0.1)*(epoch/total_epochs) + 2
-#         ODE = (10.0 - 0.1)/(0.6 - 0.1)*(epoch/total_epochs) - 1.88
-#         WRON = 0.1
-
-#     elif epoch >= 0.6*total_epochs:
-#         BC = 100.0
-#         AMPLITUDE = 100.0
-#         UMAX = 50.0
-#         UMAX_DERIV = 50.0
-#         ODE = 10
-#         WRON = (100.0 - 0.1)/(1.0 - 0.6)*(epoch/total_epochs) - 149.75
-    
-#     return [BC, AMPLITUDE, UMAX, UMAX_DERIV, ODE, WRON]
-
+#Flux loss annealing
 def annealing(epoch, total_epochs):
     lambda_initial = 10.0
     lambda_final = 1.0
@@ -285,8 +257,25 @@ t.manual_seed(0)
 model = Model(1, 4, 32, num_hidden_layers = 3).to(device = device, dtype = DTYPE)
 GBF_global = []
 
-for step_idx, omega in enumerate(omega_schedule):
-    omega = float(omega)
+resume_path = os.path.join(f"./GBFWSData/l{mode}", "latest_warm_start_checkpoint.pth")
+start_step = 0
+
+if os.path.exists(resume_path):
+    print("Previous model exists...")
+    print(f"Loading warm start checkpoint {resume_path}", flush = True)
+    print('-'*60)
+
+    checkpoint = t.load(resume_path, map_location = device, weights_only = False)
+
+    model.load_state_dict(checkpoint['model_state_dict'])
+    start_step = checkpoint['next_step_idx']
+
+    print(f"Resuming from  omega = {checkpoint['omega']:.4f}", flush = True)
+    print(f"Next frequency step = {start_step}")
+
+for step_idx in range(start_step, len(omega_schedule)):
+    omega = float(omega_schedule[step_idx])
+     
     #Make various directories for saving results
     base_path = f'./GBFWSData/l{mode}/omega{omega:.4f}'
     out_dir = os.path.join(base_path, 'NNOutput')
@@ -713,12 +702,29 @@ for step_idx, omega in enumerate(omega_schedule):
         f.write(f"Prob = {final_prob:.10f}\n")
         f.write(f"GBF = {final_gbf:.10e}\n")
 
-results = {'model_state_dict': model.state_dict()}
+    checkpoint = {'model_state_dict': model.state_dict(),
+            'mode': mode,
+            'omega': omega,
+            'step_idx': step_idx,
+            'next_step_idx': step_idx + 1,
+            'omega_schedule': omega_schedule.tolist(),
+            'mass': mass,
+            'x_max': x_max,
+            'dtype': str(DTYPE),
+            'final_alpha': final_alpha,
+            'final_beta': final_beta,
+            'final_prob': final_prob,
+            'final_gbf': final_gbf}
+        
+    checkpoint_path = os.path.join(base_path, f'pinn_checkpoint_GBFWS_l{mode}_omega{omega:.4f}.pth')
+    t.save(checkpoint, checkpoint_path)
 
-checkpoint_path = os.path.join(base_path, f'pinn_checkpoint_gbfWS_l{mode}_omega{omega:.4f}.pth') 
-t.save(results, checkpoint_path)
+    #Save and update the most recent warm-start checkpoint
+    resume_path = os.path.join(f'./GBFWSData/l{mode}', 'latest_warm_start_checkpoint.pth')
+    t.save(checkpoint, resume_path)
+    print(f"Checkpoint saved to {checkpoint_path}", flush=True)
 
-print(f'WS training complete. Checkpoint saved to {checkpoint_path}', flush = True)
+print(f'WS training complete.', flush = True)
 print(f"l = {mode} mode training completed successfully.", flush = True)
 print("="*60)
 
