@@ -265,6 +265,10 @@ GBF_global = {}
 resume_path = os.path.join(f"./GBFWSData/l{mode}", "latest_warm_start_checkpoint.pth")
 start_step = 0
 
+if args.resume and not os.path.exists(resume_path):
+    print("No previously trained model found. Initialising standard training...")
+    print("-"*60)
+
 if args.resume and os.path.exists(resume_path):
     print("Previous model exists...")
     print(f"Loading warm start checkpoint {resume_path}", flush = True)
