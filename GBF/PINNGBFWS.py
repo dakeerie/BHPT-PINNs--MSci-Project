@@ -30,6 +30,10 @@ mode = args.mode
 #Frequency schedule from high to low for continuation
 omega_schedule = np.linspace(args.omega_start, args.omega_final, args.num_steps)
 
+print(f"Initialising training for omega = {omega_schedule}")
+
+print("Not safe to train yet!")
+# raise
 # mode = 2
 # omega = 0.3
 
