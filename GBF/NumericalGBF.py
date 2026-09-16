@@ -8,12 +8,12 @@ import imageio.v2 as imageio
 import os
 import glob
 
-import sys
-from pathlib import Path
+# import sys
+# from pathlib import Path
 
-project_root = Path(__file__).resolve().parent.parent
-sys.path.insert(0, str(project_root))
-from Functions import *
+# project_root = Path(__file__).resolve().parent.parent
+# sys.path.insert(0, str(project_root))
+
 
 base_path = './GBF/Numerical'
 output_path = os.path.join(base_path, 'Output')
