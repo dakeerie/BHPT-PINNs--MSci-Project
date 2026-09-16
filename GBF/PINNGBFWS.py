@@ -186,6 +186,15 @@ def taylor_coeffs(mass, mode, omega):
     
 #     return [BC, AMPLITUDE, UMAX, UMAX_DERIV, ODE, WRON]
 
+def annealing(epoch, total_epochs):
+    lambda_initial = 10.0
+    lambda_final = 1.0
+
+    progress = epoch/(adam_iterations - 1)
+    lambda_flux = lambda_final + 0.5*(lambda_initial - lambda_final)*(1 + np.cos(np.pi*progress))
+    return lambda_flux
+
+
 #Ansatz for the wave-function u
 #Ansatz is of the form u(x) = 1 + c1*x + c2*x**2 + 100*(P + exp(2i*omega*r_star)*Q) 
 #where P and Q are complex with components corresponding to the four channel neural network output
@@ -202,7 +211,7 @@ def ansatz(model, x_tensor, mass, mode, omega):
     return u_re, u_im, P_re, P_im, Q_re, Q_im
 
 #Current loss function composed of ODE residual and Flux conservation requirement
-def compute_loss(model, x_tensor, mass, mode, omega):
+def compute_loss(model, x_tensor, mass, mode, omega, flux_weight):
 
     #ODE residual
     u_re, u_im, P_re, P_im, Q_re, Q_im = ansatz(model, x_tensor, mass, mode, omega)
@@ -226,7 +235,7 @@ def compute_loss(model, x_tensor, mass, mode, omega):
     loss_flux = t.mean(J**2)
 
     #Loss annealing to be included
-    total_loss = loss_ode + 10*loss_flux
+    total_loss = loss_ode + flux_weight*loss_flux
 
     return u_re, u_im, J, total_loss, loss_flux, loss_ode, loss_ode_re, loss_ode_im, res_ode_re, res_ode_im, P_re, P_im, Q_re, Q_im
 
@@ -316,8 +325,9 @@ for step_idx, omega in enumerate(omega_schedule):
 
         x_tensor = t.cat([x_uniform, x_edges], dim = 0).requires_grad_(True)
 
+        weight = annealing(epoch, adam_iterations)
         (Re_u_nn, Im_u_nn, flux_res, loss, loss_f, loss_o, 
-        loss_ode_real, loss_ode_imag, res_ode_re, res_ode_im, P_re, P_im, Q_re, Q_im) = compute_loss(model, x_tensor, mass, mode, omega)
+        loss_ode_real, loss_ode_imag, res_ode_re, res_ode_im, P_re, P_im, Q_re, Q_im) = compute_loss(model, x_tensor, mass, mode, omega, weight)
 
         loss.backward()
         optimiser.step()
@@ -420,6 +430,8 @@ for step_idx, omega in enumerate(omega_schedule):
     x_tensor_lbfgs = t.cat([x_uniform, x_edges], dim = 0)
     x_tensor_lbfgs.requires_grad_(True)
 
+    weight = annealing(adam_iterations, adam_iterations)
+
     for epoch in range(lbfgs_iterations):
         info = {'total': 0, 'flux': 0, 'ode': 0, 'loss_re': 0, 'loss_im': 0, 'res_re': 0, 'res_im': 0}
         plot_data = {}
@@ -427,7 +439,7 @@ for step_idx, omega in enumerate(omega_schedule):
         def closure():
             lbfgs_optimiser.zero_grad(set_to_none = True)
             (Re_u_nn, Im_u_nn, flux_res, loss, loss_f, loss_o, loss_ode_re, loss_ode_im,
-            res_ode_re, res_ode_im, P_re, P_im, Q_re, Q_im) = compute_loss(model, x_tensor_lbfgs, mass, mode, omega)
+            res_ode_re, res_ode_im, P_re, P_im, Q_re, Q_im) = compute_loss(model, x_tensor_lbfgs, mass, mode, omega, weight)
             loss.backward()
 
             info.update({'total': loss.item(), 'flux': loss_f.item(), 'ode': loss_o.item(), 'loss_re': loss_ode_re.item(), 'loss_im': loss_ode_im.item()})
