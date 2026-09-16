@@ -23,9 +23,13 @@ parser.add_argument('--mode', type = int, required = True, help = 'The value of 
 parser.add_argument('--omega_start', type = float, default = 0.3, help = 'Initial (higher) frequency')
 parser.add_argument('--omega_final', type = float, default = 0.03, help = 'Final (lower) frequency')
 parser.add_argument('--num_steps', type = int, default = 10, help = "Number of warm-start steps")
+parser.add_argument('--resume', action = 'store_true', help = 'Resume from the latest warm-start checkpoint')
 
 args = parser.parse_args()
 mode = args.mode
+
+if args.omega_start < args.omega_final:
+    raise ValueError("omega_final must be less than omega_start")
 
 #Frequency schedule from high to low for continuation
 omega_schedule = np.linspace(args.omega_start, args.omega_final, args.num_steps)
@@ -170,7 +174,6 @@ def annealing(epoch, total_epochs):
     lambda_flux = lambda_final + 0.5*(lambda_initial - lambda_final)*(1 + np.cos(np.pi*progress))
     return lambda_flux
 
-
 #Ansatz for the wave-function u
 #Ansatz is of the form u(x) = 1 + c1*x + c2*x**2 + 100*(P + exp(2i*omega*r_star)*Q) 
 #where P and Q are complex with components corresponding to the four channel neural network output
@@ -259,27 +262,61 @@ def extraction(model, x_extraction, mass, mode, omega):
 #Seed included for reproducibility
 t.manual_seed(0)
 model = Model(1, 4, 32, num_hidden_layers = 3).to(device = device, dtype = DTYPE)
-GBF_global = []
+GBF_global = {}
 
 resume_path = os.path.join(f"./GBFWSData/l{mode}", "latest_warm_start_checkpoint.pth")
 start_step = 0
 
-if os.path.exists(resume_path):
+if args.resume and os.path.exists(resume_path):
     print("Previous model exists...")
     print(f"Loading warm start checkpoint {resume_path}", flush = True)
     print('-'*60)
 
     checkpoint = t.load(resume_path, map_location = device, weights_only = False)
 
+    if checkpoint['mode'] != mode:
+        raise ValueError(f"Checkpoint is for l = {checkpoint['mode']}, current run requested l={mode}.")
+
+    if not np.isclose(checkpoint['mass'], mass):
+        raise ValueError("Checkpoint mass does not match current run.")
+
+    if not np.isclose(checkpoint['x_max'], x_max):
+        raise ValueError("Checkpoint x_max does not match current run.")
+
     model.load_state_dict(checkpoint['model_state_dict'])
-    start_step = checkpoint['next_step_idx']
+    loaded_GBF_global = checkpoint.get("GBF_global", {})
+
+    if isinstance(loaded_GBF_global, dict):
+        GBF_global = loaded_GBF_global
+
+    else:
+        old_schedule = checkpoint.get("omega_schedule", [])
+
+        if len(old_schedule) != len(loaded_GBF_global):
+            raise ValueError("Old checkpoint contains list-based GBF_global but its omega_schedule is incompatible.")
+
+        GBF_global = {round(float(omega), 4): float(gbf) for omega, gbf in zip(old_schedule, loaded_GBF_global)}
+
+    completed_omegas = set(GBF_global.keys())
+
+    remaining_steps = [i for i, omega in enumerate(omega_schedule) if round(float(omega), 4) not in completed_omegas]
+
+    if len(remaining_steps) == 0:
+        start_step = len(omega_schedule)
+        print("No frequencies remaining in the schedule.")
+    else:
+        start_step = remaining_steps[0]
+        print(f"Next omega = {omega_schedule[start_step]:.4f}")
 
     print(f"Resuming from  omega = {checkpoint['omega']:.4f}", flush = True)
-    print(f"Next frequency step = {start_step}")
+
+    # if start_step < len(omega_schedule):
+    #     print(f"Next omega = {omega_schedule[start_step]:.4f}")
 
 for step_idx in range(start_step, len(omega_schedule)):
     omega = float(omega_schedule[step_idx])
-     
+    is_first_frequency_of_run = (step_idx == start_step)
+    
     #Make various directories for saving results
     base_path = f'./GBFWSData/l{mode}/omega{omega:.4f}'
     out_dir = os.path.join(base_path, 'NNOutput')
@@ -299,8 +336,14 @@ for step_idx in range(start_step, len(omega_schedule)):
     learning_rate = 1e-3
     optimiser = optim.Adam(model.parameters(), lr = learning_rate)
 
-    adam_iterations = 18000 if step_idx == 0 else 10000
-    lbfgs_iterations = 1000 if step_idx == 0 else 800
+    adam_iterations = 18000 if is_first_frequency_of_run else 10000
+    lbfgs_iterations = 1000 if is_first_frequency_of_run else 800
+
+    if is_first_frequency_of_run:
+        print("First frequency of this run- using larger training budget.")
+    else:
+        print("Continuation frequency- using standard training budget.")
+    print("-"*60)
 
     hist_total, hist_flux, hist_ode, hist_ode_re, hist_ode_im, hist_weight = [], [], [], [], [], []
     GBF, probability, alphas, betas, extraction_epochs = [], [], [], [], []
@@ -434,7 +477,7 @@ for step_idx in range(start_step, len(omega_schedule)):
     x_tensor_lbfgs = t.cat([x_uniform, x_edges], dim = 0)
     x_tensor_lbfgs.requires_grad_(True)
 
-    flux_weight = annealing(adam_iterations, adam_iterations)
+    flux_weight = annealing(adam_iterations - 1, adam_iterations)
 
     for epoch in range(lbfgs_iterations):
         info = {'total': 0, 'flux': 0, 'ode': 0, 'loss_re': 0, 'loss_im': 0, 'res_re': 0, 'res_im': 0}
@@ -685,7 +728,7 @@ for step_idx in range(start_step, len(omega_schedule)):
     print("="*60)
 
     final_alpha, final_beta, final_prob, final_gbf = extraction(model, x_max, mass, mode, omega)
-    GBF_global.append(final_gbf)
+    GBF_global[round(omega, 4)] = final_gbf
     T = 1/final_alpha
     R = final_beta/final_alpha
 
@@ -707,6 +750,7 @@ for step_idx in range(start_step, len(omega_schedule)):
         f.write(f"GBF = {final_gbf:.10e}\n")
 
     checkpoint = {'model_state_dict': model.state_dict(),
+            'model_architecture': {'in_channels': 1, 'out_channels': 4, 'hidden_channels': 32,  'hidden_layers': 3},
             'mode': mode,
             'omega': omega,
             'step_idx': step_idx,
@@ -715,10 +759,15 @@ for step_idx in range(start_step, len(omega_schedule)):
             'mass': mass,
             'x_max': x_max,
             'dtype': str(DTYPE),
+            'adam_iterations': adam_iterations,
+            'lbfgs_iterations': lbfgs_iterations,
+            'flux_weight_initial': 10.0,
+            'flux_weight_final': 1.0,
             'final_alpha': final_alpha,
             'final_beta': final_beta,
             'final_prob': final_prob,
-            'final_gbf': final_gbf}
+            'final_gbf': final_gbf,
+            'GBF_global': GBF_global}
         
     checkpoint_path = os.path.join(base_path, f'pinn_checkpoint_GBFWS_l{mode}_omega{omega:.4f}.pth')
     t.save(checkpoint, checkpoint_path)
@@ -732,8 +781,12 @@ print(f'WS training complete.', flush = True)
 print(f"l = {mode} mode training completed successfully.", flush = True)
 print("="*60)
 
+plot_data_global = sorted(GBF_global.items())
+plot_omegas = [omega for omega, gbf in plot_data_global]
+plot_GBFs = [gbf for omega, gbf in plot_data_global]
+
 plt.figure(figsize = [6,4])
-plt.plot(omega_schedule, GBF_global, 'o-', color = 'red', label = 'Grey-body Factor')
+plt.plot(plot_omegas, plot_GBFs, 'o-', color = 'red', label = 'Grey-body Factor')
 plt.xlabel(r'$\omega$', fontsize = 16)
 plt.ylabel(r'$\Gamma \left(\omega \right)$', fontsize = 16)
 plt.title(f'The Grey-Body Factor for l = {mode}'
