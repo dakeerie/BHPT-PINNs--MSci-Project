@@ -776,10 +776,10 @@ R = final_beta/final_alpha
 
 result_file_path = os.path.join(base_path, 'result.txt')
 with open(result_file_path, 'w') as f:
-    f.write(f"l = {int(mode)}")
-    f.write(f"omega = {omega}")
-    f.write(f"final ODE loss = {info['ode']:.4e}")
-    f.write(f"final flux loss = {info['flux']:.4e}")
+    f.write(f"l = {int(mode)}\n")
+    f.write(f"omega = {omega}\n")
+    f.write(f"final ODE loss = {info['ode']:.4e}\n")
+    f.write(f"final flux loss = {info['flux']:.4e}\n")
     f.write(f"alpha_re = {final_alpha.real:.10f}\n")
     f.write(f"alpha_im = {final_alpha.imag:.10f}\n")
     f.write(f"beta_re = {final_beta.real:.10f}\n")
