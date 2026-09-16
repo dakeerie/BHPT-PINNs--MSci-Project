@@ -526,16 +526,17 @@ for step_idx, omega in enumerate(omega_schedule):
 
     r_plot = 2*mass/(1 - x_plot)
     #Final plots after training
-    plt.figure()
-    plt.suptitle(f"l = {mode}, omega = {omega:.4f}")
+    plt.figure(figsize = [20, 10])
     plt.subplot(1, 2, 1)
+    plt.suptitle("Direct Neural Network Output"
+        "\n"
+        f"l = {mode}, omega = {omega:.4f}")
     plt.plot(x_plot[idx], plot_data['P_re'].flatten()[idx], label = 'Re(P)')
     plt.plot(x_plot[idx], plot_data['P_im'].flatten()[idx], label = 'Im(P)')
     plt.plot(x_plot[idx], plot_data['Q_re'].flatten()[idx], label = 'Re(Q)')
     plt.plot(x_plot[idx], plot_data['Q_im'].flatten()[idx], label = 'Im(Q)')
     plt.xlabel('x', fontsize = 20)
     plt.ylabel('P and Q', fontsize = 20)
-    plt.title('Direct Neural Network Output vs. x', fontsize = 21)
     plt.legend()
     plt.grid()
     plt.tight_layout()
@@ -547,7 +548,6 @@ for step_idx, omega in enumerate(omega_schedule):
     plt.plot(r_plot[idx], plot_data['Q_im'].flatten()[idx], label = 'Im(Q)')
     plt.xlabel('r', fontsize = 20)
     plt.ylabel('P and Q', fontsize = 20)
-    plt.title('Direct Neural Network Output vs. r', fontsize = 21)
     plt.legend()
     plt.grid()
     plt.tight_layout()
@@ -555,16 +555,15 @@ for step_idx, omega in enumerate(omega_schedule):
     plt.savefig(f'{final_plots_dir}/PQ.png', format = 'png')
     plt.close()
 
-    plt.figure()
-    plt.suptitle(f"l = {mode}, omega = {omega:.4f}")
+    plt.figure(figsize  = [20, 10])
     plt.subplot(1, 2, 1)
+    plt.suptitle("Wave function u built via ansatz of P and Q"
+        "\n"
+        f"l = {mode}, omega = {omega:.4f}")
     plt.plot(x_plot[idx], plot_data['re_u'].flatten()[idx], color = 'orange', label = r'$\Re (u_{NN})$')
     plt.plot(x_plot[idx], plot_data['im_u'].flatten()[idx], color = 'red', label = r'$\Im (u_{NN})$')
     plt.xlabel('x', fontsize = 20)
-    plt.ylabel(r'$u(x) = c_1x + c_2 x^2 + 100x^3(P + \exp{\left(2 \text{i} \omega r_*\right)Q}$', fontsize = 20)
-    plt.title('Wave function u'
-            '\n'
-            'Built via ansatz of NN output (P and Q)', fontsize = 21)
+    plt.ylabel(r'$u(x)$', fontsize = 20)
     plt.legend()
     plt.grid()
     plt.tight_layout()
@@ -581,14 +580,15 @@ for step_idx, omega in enumerate(omega_schedule):
     plt.savefig(f'{final_plots_dir}/u.png', format = 'png')
     plt.close()
 
-    plt.figure()
-    plt.suptitle(f"l = {mode}, omega = {omega:.4f}")
+    plt.figure(figsize = [20, 10])
     plt.subplot(1, 2, 1)
+    plt.suptitle("ODE Residual"
+        "\n"
+        f"l = {mode}, omega = {omega:.4f}")
     plt.plot(x_plot[idx], plot_data['res_re'].flatten()[idx], label = 'Re(res)')
     plt.plot(x_plot[idx], plot_data['res_im'].flatten()[idx], label = 'Im(res)')
     plt.xlabel('x', fontsize = 20)
     plt.ylabel('Residual', fontsize = 20)
-    plt.title('ODE residual vs. x', fontsize = 21)
     plt.legend()
     plt.grid()
     plt.tight_layout()
@@ -598,7 +598,6 @@ for step_idx, omega in enumerate(omega_schedule):
     plt.plot(r_plot[idx], plot_data['res_im'].flatten()[idx], label = 'Im(res)')
     plt.xlabel('r', fontsize = 20)
     plt.ylabel('Residual', fontsize = 20)
-    plt.title('ODE residual vs. r', fontsize = 21)
     plt.legend()
     plt.grid()
     plt.tight_layout()
@@ -640,6 +639,7 @@ for step_idx, omega in enumerate(omega_schedule):
     fig, ax1 = plt.subplots(figsize = [7, 4.5])
 
     ax1.plot(extraction_epochs, GBF, color = 'blue', label = r'$\Gamma$')
+    ax1.scatter(extraction_epochs[-1], GBF[-1], marker = 'o', s = 30, color = 'lime', label = r"Final $\Gamma$")
     ax1.set_yscale('log')
     ax1.set_xlabel('Epoch', fontsize = 14)
     ax1.set_ylabel(r'$\Gamma$', fontsize = 16)
@@ -650,6 +650,7 @@ for step_idx, omega in enumerate(omega_schedule):
 
     ax2 = ax1.twinx()
     ax2.plot(extraction_epochs, probability, color = 'red', label = r'$|\alpha|^2 - |\beta|^2$')
+    ax2.scatter(extraction_epochs[-1], probability[-1], marker = 'o', s = 30, color = 'magenta', label = r'Final $|\alpha|^2 - |\beta|^2$')
     ax2.set_ylabel(r'$|\alpha|^2 - |\beta|^2$', fontsize = 16)
     ax2.tick_params(axis = 'y')
     ax2.axhline(1.0, color = 'red', linestyle = ':', linewidth = 1, label = r'Target $|\alpha|^2 - |\beta|^2$')
