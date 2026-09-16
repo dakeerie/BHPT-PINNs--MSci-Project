@@ -348,7 +348,7 @@ for step_idx, omega in enumerate(omega_schedule):
                 probability.append(prob)
                 GBF.append(gbf)
                 if (epoch + 1) % 500 ==0 or epoch == 0:
-                    print(f"""Epoch: {epoch + 1} / {adam_iterations}. Total scaled loss: {loss.item():.4e}, 
+                    print(f"""l = {mode}, omega = {omega:.4f} | Adam Epoch: {epoch + 1} / {adam_iterations}. Total scaled loss: {loss.item():.4e}, 
                             Flux loss: {loss_f.item():.4e},
                             ODE loss: {loss_o.item():.4e},
                             Real component of ODE loss: {loss_ode_real.item():.4e}, 
@@ -487,7 +487,7 @@ for step_idx, omega in enumerate(omega_schedule):
                 probability.append(prob)
                 GBF.append(gbf)
                 
-                print(f"""L-BFGS Epoch: {epoch + 1} / {lbfgs_iterations}. Total scaled loss: {info['total']:.4e}, 
+                print(f"""l = {mode}, omega = {omega:.4f} | L-BFGS Epoch: {epoch + 1} / {lbfgs_iterations}. Total scaled loss: {info['total']:.4e}, 
                             Flux loss: {info['flux']:.4e},
                             ODE loss: {info['ode']:.4e},
                             Real component of loss: {info['loss_re']:.4e}, 
@@ -720,6 +720,7 @@ t.save(results, checkpoint_path)
 
 print(f'WS training complete. Checkpoint saved to {checkpoint_path}', flush = True)
 print(f"l = {mode} mode training completed successfully.", flush = True)
+print("="*60)
 
 plt.figure(figsize = [6,4])
 plt.plot(omega_schedule, GBF_global, 'o-', color = 'red', label = 'Grey-body Factor')
@@ -732,3 +733,5 @@ plt.grid()
 plt.legend()
 plt.savefig(f"./GBFWSData/l{mode}/GreyBodyFactor.png", format = 'png')
 plt.close()
+
+print(f"Full Grey-Body Factor figure saved to ./GBFWSData/l{mode}/GreyBodyFactor.png")
