@@ -172,6 +172,17 @@ def annealing(epoch, total_epochs):
     lambda_flux = lambda_final + 0.5*(lambda_initial - lambda_final)*(1 + np.cos(np.pi*progress))
     return lambda_flux
 
+beta_dist = dist.Beta(t.tensor([0.6]), t.tensor([0.1]))
+
+def sample_training_points(n_points, x_max, mass, dtype, device):
+    n_uniform = int(0.6*n_points)
+    n_edges = n_points - n_uniform
+
+    x_uniform = x_max*t.rand((n_uniform, 1), dtype = dtype, device = device)
+    x_edges = beta_dist.sample((n_edges,)).view(-1, 1).to(device = device, dtype = DTYPE)
+
+    return t.cat([x_uniform, x_edges], dim = 0)
+
 #Ansatz for the wave-function u
 #Ansatz is of the form u(x) = 1 + c1*x + c2*x**2 + 100*(P + exp(2i*omega*r_star)*Q) 
 #where P and Q are complex with components corresponding to the four channel neural network output
@@ -279,6 +290,12 @@ if args.resume and os.path.exists(resume_path):
     if checkpoint['mode'] != mode:
         raise ValueError(f"Checkpoint is for l = {checkpoint['mode']}, current run requested l={mode}.")
 
+    if checkpoint.get('checkpoint_type') != 'completed_frequency':
+        raise ValueError("Resume checkpoint is not marked as a completed frequency checkpoint.")
+
+    if not checkpoint.get('training_complete', False):
+        raise ValueError("Resume checkpoint is not marked as fully trained.")
+
     if not np.isclose(checkpoint['mass'], mass):
         raise ValueError("Checkpoint mass does not match current run.")
 
@@ -354,15 +371,8 @@ for step_idx in range(start_step, len(omega_schedule)):
     #Adam loop
     for epoch in range(adam_iterations):
         optimiser.zero_grad(set_to_none = True)
-        N_uniform = int(0.6*N_points)
-        x_uniform = x_max*t.rand((N_uniform, 1), dtype = DTYPE, device = device)
 
-        N_edges = N_points - N_uniform
-        r_h, r_far =2*mass, 2*mass/(1 - x_max)
-        r_samp = r_h + (r_far - r_h)*t.rand((N_edges, 1), dtype = DTYPE, device = device)
-        x_edges = 1 - 2*mass/r_samp
-
-        x_tensor = t.cat([x_uniform, x_edges], dim = 0).requires_grad_(True)
+        x_tensor = sample_training_points(N_points, x_max, mass, dtype = DTYPE, device = device)
 
         flux_weight = annealing(epoch, adam_iterations)
         hist_weight.append(flux_weight)
@@ -461,7 +471,7 @@ for step_idx in range(start_step, len(omega_schedule)):
     plt.ylabel(r'$\lambda_{\mathrm{flux}}$')
     plt.grid()
     plt.tight_layout()
-    plt.savefig(f'{base_path}/FluxWeights.png', format = 'png')
+    plt.savefig(f'{final_plots_dir}/FluxWeights.png', format = 'png')
     plt.close()
 
     print("Adam training complete. Switching to L-BFGS:", flush = True)
@@ -587,7 +597,7 @@ for step_idx in range(start_step, len(omega_schedule)):
 
     r_plot = 2*mass/(1 - x_plot)
     #Final plots after training
-    plt.figure(figsize = [20, 10])
+    plt.figure(figsize = [14, 6])
     plt.subplot(1, 2, 1)
     plt.suptitle("Direct Neural Network Output"
         "\n"
@@ -616,7 +626,7 @@ for step_idx in range(start_step, len(omega_schedule)):
     plt.savefig(f'{final_plots_dir}/PQ.png', format = 'png')
     plt.close()
 
-    plt.figure(figsize  = [20, 10])
+    plt.figure(figsize  = [14, 6])
     plt.subplot(1, 2, 1)
     plt.suptitle("Wave function u built via ansatz of P and Q"
         "\n"
@@ -641,7 +651,7 @@ for step_idx in range(start_step, len(omega_schedule)):
     plt.savefig(f'{final_plots_dir}/u.png', format = 'png')
     plt.close()
 
-    plt.figure(figsize = [20, 10])
+    plt.figure(figsize = [14, 6])
     plt.subplot(1, 2, 1)
     plt.suptitle("ODE Residual"
         "\n"
@@ -736,6 +746,7 @@ for step_idx in range(start_step, len(omega_schedule)):
 
     result_file_path = os.path.join(base_path, 'result.txt')
     with open(result_file_path, 'w') as f:
+        f.write(f"Warms-start\n")
         f.write(f"l = {int(mode)}\n")
         f.write(f"omega = {omega:.4f}\n")
         f.write(f"final ODE loss = {info['ode']:.4e}\n")
@@ -769,7 +780,9 @@ for step_idx in range(start_step, len(omega_schedule)):
             'final_beta': final_beta,
             'final_prob': final_prob,
             'final_gbf': final_gbf,
-            'GBF_global': GBF_global}
+            'GBF_global': GBF_global,
+            'checkpoint_type': 'completed_frequency',
+            'training_complete': True}
         
     checkpoint_path = os.path.join(base_path, f'pinn_checkpoint_GBFWS_l{mode}_omega{omega:.4f}.pth')
     t.save(checkpoint, checkpoint_path)
