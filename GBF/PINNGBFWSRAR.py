@@ -414,7 +414,7 @@ for step_idx in range(start_step, len(omega_schedule)):
     is_first_frequency_of_run = (step_idx == start_step)
     
     #Make various directories for saving results
-    base_path = f'./GBFWSData/l{mode}/omega{omega:.4f}'
+    base_path = f'./GBFWSRARData/l{mode}/omega{omega:.4f}'
     out_dir = os.path.join(base_path, 'NNOutput')
     loss_dir = os.path.join(base_path, 'Loss')
     flux_dir = os.path.join(base_path, 'Flux')
@@ -859,7 +859,7 @@ for step_idx in range(start_step, len(omega_schedule)):
 
     result_file_path = os.path.join(base_path, 'result.txt')
     with open(result_file_path, 'w') as f:
-        f.write(f"Warms-start\n")
+        f.write(f"Warm-start RAR\n")
         f.write(f"l = {int(mode)}\n")
         f.write(f"omega = {omega:.4f}\n")
         f.write(f"final ODE loss = {info['ode']:.4e}\n")
