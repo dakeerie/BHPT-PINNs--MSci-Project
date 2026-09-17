@@ -776,6 +776,7 @@ R = final_beta/final_alpha
 
 result_file_path = os.path.join(base_path, 'result.txt')
 with open(result_file_path, 'w') as f:
+    f.write(f"Regular\n")
     f.write(f"l = {int(mode)}\n")
     f.write(f"omega = {omega}\n")
     f.write(f"final ODE loss = {info['ode']:.4e}\n")
