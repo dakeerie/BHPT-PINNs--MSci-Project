@@ -219,10 +219,10 @@ def select_rar_points(model, n_candidates, n_add, x_max, mass, mode, omega, devi
     n_add = min(n_add, x_candidates.shape[0])
 
     ranked_indices = t.argsort(scores, descending =  True)
-    canditate_x = x_candidates.flatten().detach().cpu().numpy()
+    candidate_x = x_candidates.flatten().detach().cpu().numpy()
 
     if existing_rar_points is not None and existing_rar_points.numel() > 0:
-        occupied_x = existing_rar_points.flatten().detach().cpu().numpy()
+        occupied_x = existing_rar_points.flatten().detach().cpu().numpy().tolist()
         occupied_x.sort()
     else:
         occupied_x = []
@@ -230,7 +230,7 @@ def select_rar_points(model, n_candidates, n_add, x_max, mass, mode, omega, devi
     accepted_indices = []
 
     for idx in ranked_indices.detach().cpu().numpy():
-        x_value = float(canditate_x[idx])
+        x_value = float(candidate_x[idx])
 
         insertion_index = bisect.bisect_left(occupied_x, x_value)
 
