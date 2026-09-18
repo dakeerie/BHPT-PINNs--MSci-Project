@@ -9,6 +9,7 @@ import os
 import argparse
 from matplotlib import rc
 import bisect
+import csv
 
 plt.rcParams.update({
     "font.family": "serif",
@@ -20,14 +21,18 @@ plt.rcParams.update({
 #Argument parser
 #mode is value of l, omega is value of omega and check is included to check system initialises correctly
 parser = argparse.ArgumentParser(description = "Train PINN for specific mode l")
+parser.add_argument('--mass', type = float, required = True, help = "Black hole mass")
 parser.add_argument('--mode', type = int, required = True, help = 'The value of l (mode)')
+parser.add_argument('--x_extract', type = float, required = True, help = "GBF extraction coordinate")
 parser.add_argument('--omega_start', type = float, default = 0.3, help = 'Initial (higher) frequency')
 parser.add_argument('--omega_final', type = float, default = 0.03, help = 'Final (lower) frequency')
 parser.add_argument('--num_steps', type = int, default = 10, help = "Number of warm-start steps")
 parser.add_argument('--resume', action = 'store_true', help = 'Resume from the latest warm-start checkpoint')
 
 args = parser.parse_args()
+mass = args.mass
 mode = args.mode
+x_max = args.x_extract
 
 if args.omega_start < args.omega_final:
     raise ValueError("omega_final must be less than omega_start")
@@ -51,8 +56,6 @@ print(f"Using device: {device}", flush = True)
 
 #Set up domain and BH mass
 epsilon = 1e-8
-mass = 0.5
-x_max = 0.95 
 # rstar_max = r_to_rstar(x_to_r(x_max, mass), mass)
 # rstar_max_tensor = t.tensor(rstar_max, requires_grad = True, dtype = DTYPE, device = device).view(-1, 1)
 
@@ -604,6 +607,8 @@ for step_idx in range(start_step, len(omega_schedule)):
 
     flux_weight = annealing(adam_iterations - 1, adam_iterations)
 
+    lbfgs_success = True
+
     for epoch in range(lbfgs_iterations):
         info = {'total': 0, 'flux': 0, 'ode': 0, 'loss_re': 0, 'loss_im': 0, 'res_re': 0, 'res_im': 0}
         plot_data = {}
@@ -637,6 +642,7 @@ for step_idx in range(start_step, len(omega_schedule)):
 
         if not np.isfinite(info['total']):
             print(f"L-BFGS diverged at epoch {epoch}; stopping.", flush=True)
+            lbfgs_success = False
             break
 
         if (epoch + 1) % 40 == 0 or epoch == (lbfgs_iterations - 1):
@@ -704,6 +710,10 @@ for step_idx in range(start_step, len(omega_schedule)):
                 plt.tight_layout()
                 plt.savefig(f'{flux_dir}/Flux_Residual_Epoch_{epoch + 1 + adam_iterations}.png', format = 'png')
                 plt.close()
+
+    if not lbfgs_success:
+        print(f"L-BFGS failed for l = {mode}, omega = {omega:.4f}. Frequency will not be marked as complete.", flush = True)
+        continue
 
     print(f"Training complete for l = {mode}, omega = {omega:.4f}. Plotting results...)")
     print("="*60)
@@ -931,3 +941,107 @@ plt.savefig(f"./GBFWSData/l{mode}/GreyBodyFactor.png", format = 'png')
 plt.close()
 
 print(f"Full Grey-Body Factor figure saved to ./GBFWSData/l{mode}/GreyBodyFactor.png")
+print("="*60)
+
+numerical_csv_path = f"./Numerical/l{mode}/Output/numericalGBF.csv"
+
+if os.path.exists(numerical_csv_path):
+    print("Numerical csv found. Generating comparison data...")
+
+    numerical_results = {}
+
+    with open(numerical_csv_path, "r", newline = "") as f:
+        reader = csv.DictReader(f)
+
+        for row in reader:
+            omega = float(row["omega"])
+            numerical_results[round(omega, 4)] = float(row["GBF"])
+
+    comparison_omegas = []
+    pinn_GBFs = []
+    numerical_GBFs = []
+    absolute_differences = []
+    relative_differences = []
+
+    for omega in omega_schedule:
+        key = round(float(omega), 4)
+
+        if key not in numerical_results:
+            raise ValueError(f"No numerical result found for omega = {omega:.4f}")
+
+        if key not in GBF_global:
+            raise ValueError(f"No PINN result found for omega = {omega:.4f}")
+
+        pinn_gbf = float(GBF_global[key])
+        numerical_gbf = float(numerical_results[key])
+
+        comparison_omegas.append(float(omega))
+        pinn_GBFs.append(pinn_gbf)
+        numerical_GBFs.append(numerical_gbf)
+        absolute_differences.append(abs(pinn_gbf - numerical_gbf))
+        relative_differences.append(abs(pinn_gbf - numerical_gbf)/abs(numerical_gbf))
+
+    comparison_csv_path = (f'./GBFWSRARData/l{mode}/PINN_vs_Numerical.csv')
+
+    with open(comparison_csv_path, 'w', newline = '') as f:
+        writer = csv.writer(f)
+
+        writer.writerow(['omega', 'PINN_GBF', 'Numerical_GBF','Absolute_Difference', 'Relative_Difference'])
+
+        for omega, pinn_gbf, numerical_gbf, abs_diff, rel_diff in zip(comparison_omegas, pinn_GBFs, numerical_GBFs, absolute_differences, relative_differences):
+            writer.writerow([ f'{omega:.8f}', f'{pinn_gbf:.12e}', f'{numerical_gbf:.12e}', f'{abs_diff:.12e}', f'{rel_diff:.12e}'])
+
+    comparison_omegas = np.array(comparison_omegas)
+    pinn_GBFs = np.array(pinn_GBFs)
+    numerical_GBFs = np.array(numerical_GBFs)
+    absolute_differences = np.array(absolute_differences)
+
+    plt.figure(figsize = [14, 6])
+    plt.subplot(1, 2, 1)
+    plt.suptitle("PINNWSRAR and Numerical GBF"
+                "\n"
+                f"l = {mode}")
+    plt.plot(comparison_omegas, numerical_GBFs, 'o-', label = 'Numerical')
+    plt.plot(comparison_omegas, pinn_GBFs,'x-', label = 'PINNWSRAR')
+    plt.ylabel(r"$\Gamma(\omega)$", fontsize = 16)
+    plt.xlabel(r"$\omega$", fontsize = 16)
+    plt.legend()
+    plt.grid()
+    plt.tight_layout()
+
+    plt.subplot(1, 2, 2)
+    plt.plot(comparison_omegas, numerical_GBFs, 'o-', label = 'Numerical')
+    plt.plot(comparison_omegas, pinn_GBFs,'x-', label = 'PINNWSRAR')
+    plt.ylabel(r"$\Gamma(\omega)$", fontsize = 16)
+    plt.xlabel(r"$\omega$", fontsize = 16)
+    plt.yscale('log')
+    plt.legend()
+    plt.grid()
+    plt.tight_layout()
+    plt.savefig(f'./GBFWSRARData/l{mode}/PINNvsNumerical.png', format = 'png')
+    plt.close()
+
+    plt.figure(figsize = [14, 6])
+    plt.subplot(1, 2, 1)
+    plt.suptitle("PINNWSRAR and Numerical GBF"
+                "\n"
+                f"l = {mode}")
+    plt.plot(comparison_omegas, absolute_differences, 'o')
+    plt.ylabel(r"$\Gamma(\omega)$", fontsize = 16)
+    plt.xlabel(r"$\omega$", fontsize = 16)
+    plt.title("Absolute Difference", fontsize = 16)
+    plt.grid()
+    plt.tight_layout()
+
+    plt.subplot(1, 2, 2)
+    plt.plot(comparison_omegas, relative_differences, 'o')
+    plt.ylabel(r"$\Gamma(\omega)$", fontsize = 16)
+    plt.xlabel(r"$\omega$", fontsize = 16)
+    plt.title("Relative Difference", fontsize = 16)
+    plt.grid()
+    plt.tight_layout()
+    plt.savefig(f'./GBFWSRARData/l{mode}/PINNvsNumericalDifferences.png', format = 'png')
+    plt.close()
+
+else:
+    print("No numerical csv found. End of program.")
