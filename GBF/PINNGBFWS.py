@@ -19,6 +19,7 @@ plt.rcParams.update({
 #Argument parser
 #mode is value of l, omega is value of omega and check is included to check system initialises correctly
 parser = argparse.ArgumentParser(description = "Train PINN for specific mode l")
+parser.add_argument('--mass', type = float, required = True, help = "Black hole mass")
 parser.add_argument('--mode', type = int, required = True, help = 'The value of l (mode)')
 parser.add_argument('--omega_start', type = float, default = 0.3, help = 'Initial (higher) frequency')
 parser.add_argument('--omega_final', type = float, default = 0.03, help = 'Final (lower) frequency')
@@ -26,6 +27,7 @@ parser.add_argument('--num_steps', type = int, default = 10, help = "Number of w
 parser.add_argument('--resume', action = 'store_true', help = 'Resume from the latest warm-start checkpoint')
 
 args = parser.parse_args()
+mass = args.mass
 mode = args.mode
 
 if args.omega_start < args.omega_final:
@@ -48,9 +50,8 @@ device = t.device('cuda' if t.cuda.is_available() else 'cpu')
 t.set_num_threads(4)
 print(f"Using device: {device}", flush = True)
 
-#Set up domain and BH mass
+#Set up domain
 epsilon = 1e-8
-mass = 0.5
 x_max = 0.95 
 # rstar_max = r_to_rstar(x_to_r(x_max, mass), mass)
 # rstar_max_tensor = t.tensor(rstar_max, requires_grad = True, dtype = DTYPE, device = device).view(-1, 1)
