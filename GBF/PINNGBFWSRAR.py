@@ -353,7 +353,7 @@ t.manual_seed(0)
 model = Model(1, 4, 32, num_hidden_layers = 3).to(device = device, dtype = DTYPE)
 GBF_global = {}
 
-resume_path = os.path.join(f"./GBFWSData/l{mode}", "latest_warm_start_checkpoint.pth")
+resume_path = os.path.join(f"./GBFWSRARData/l{mode}", "latest_warm_start_checkpoint.pth")
 start_step = 0
 
 if args.resume and not os.path.exists(resume_path):
@@ -912,11 +912,11 @@ for step_idx in range(start_step, len(omega_schedule)):
             'checkpoint_type': 'completed_frequency',
             'training_complete': True}
         
-    checkpoint_path = os.path.join(base_path, f'pinn_checkpoint_GBFWS_l{mode}_omega{omega:.4f}.pth')
+    checkpoint_path = os.path.join(base_path, f'pinn_checkpoint_GBFWSRAR_l{mode}_omega{omega:.4f}.pth')
     t.save(checkpoint, checkpoint_path)
 
     #Save and update the most recent warm-start checkpoint
-    resume_path = os.path.join(f'./GBFWSData/l{mode}', 'latest_warm_start_checkpoint.pth')
+    resume_path = os.path.join(f'./GBFWSRARData/l{mode}', 'latest_warm_start_checkpoint.pth')
     t.save(checkpoint, resume_path)
     print(f"Checkpoint saved to {checkpoint_path}", flush=True)
 
@@ -1030,6 +1030,7 @@ if os.path.exists(numerical_csv_path):
     plt.ylabel(r"$\Gamma(\omega)$", fontsize = 16)
     plt.xlabel(r"$\omega$", fontsize = 16)
     plt.title("Absolute Difference", fontsize = 16)
+    plt.yscale("log")
     plt.grid()
     plt.tight_layout()
 
@@ -1038,6 +1039,7 @@ if os.path.exists(numerical_csv_path):
     plt.ylabel(r"$\Gamma(\omega)$", fontsize = 16)
     plt.xlabel(r"$\omega$", fontsize = 16)
     plt.title("Relative Difference", fontsize = 16)
+    plt.yscale("log")
     plt.grid()
     plt.tight_layout()
     plt.savefig(f'./GBFWSRARData/l{mode}/PINNvsNumericalDifferences.png', format = 'png')
