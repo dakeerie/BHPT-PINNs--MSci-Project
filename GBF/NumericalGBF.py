@@ -54,7 +54,6 @@ omega_schedule = np.linspace(args.omega_start, args.omega_final, args.num_steps)
 
 modes = [mode]
 
-
 RTOL = 1e-9
 ATOL = 1e-11
 
@@ -170,7 +169,7 @@ for mode in modes:
 
         results[mode][om] = {'GBF': GBF, 'flux_check': flux_check,'alpha': alpha, 'beta': beta,
                     'x_end': x_end, 'r_end': 2*mass/(1 - x_end), 'method': "DOP853", "eps": eps, 'rtol': RTOL, 'atol': ATOL, 'success': bool(sol.success)}
-        rows.append({'l': int(mode), 'omega': om, 'GBF': GBF, 'log10GBF': np.log10(GBF), 'flux_check': flux_check,
+        rows.append({'mass': mass, 'mode': int(mode), 'omega': om, 'GBF': GBF, 'log10GBF': np.log10(GBF), 'flux_check': flux_check,
                     'alpha_re': alpha.real, 'alpha_im': alpha.imag, 'beta_re': beta.real, 'beta_im': beta.imag, 'x_extract': x_extract,
                     'x_end': x_end, 'r_end': 2*mass/(1 - x_end), 'method': "DOP853", "eps": eps, 'rtol': RTOL, 'atol': ATOL, 'success': bool(sol.success)})
 
@@ -181,13 +180,76 @@ if not rows:
 
 fields = list(rows[0].keys())
 csv_path = os.path.join(output_path, "numericalGBF.csv")
-with open(csv_path, 'w', newline = '') as f:
-    w = csv.DictWriter(f, fieldnames = fields)
-    w.writeheader()
-    for r in rows:
-        w.writerow({k: (f'{v:.12e}' if isinstance(v, float) else v) for k, v in r.items()})
-print(f'Wrote {len(rows)} rows to {csv_path}')
 
+def format_csv_row(row):
+    return {
+        'mass': f"{float(row['mass']):.12e}",
+        'mode': int(row['mode']),
+        'omega': f"{float(row['omega']):.12e}",
+        'GBF': f"{float(row['GBF']):.12e}",
+        'log10GBF': f"{float(row['log10GBF']):.12e}",
+        'flux_check': f"{float(row['flux_check']):.12e}",
+        'alpha_re': f"{float(row['alpha_re']):.12e}",
+        'alpha_im': f"{float(row['alpha_im']):.12e}",
+        'beta_re': f"{float(row['beta_re']):.12e}",
+        'beta_im': f"{float(row['beta_im']):.12e}",
+        'x_extract': f"{float(row['x_extract']):.12e}",
+        'x_end': f"{float(row['x_end']):.12e}",
+        'r_end': f"{float(row['r_end']):.12e}",
+        'method': row['method'],
+        'eps': f"{float(row['eps']):.12e}",
+        'rtol': f"{float(row['rtol']):.12e}",
+        'atol': f"{float(row['atol']):.12e}",
+        'success': row['success']
+    }
+
+if os.path.exists(csv_path):
+    print(f"Existing numerical CSV found: {csv_path}")
+    print("Loading previous numerical results...")
+
+    with open(csv_path, 'r', newline = '') as f:
+        reader = csv.DictReader(f)
+        existing_rows = list(reader)
+
+    # existing_rows = [row for row in existing_rows if float(row['mass']) == mass and int(row['mode']) == mode]
+    existing_omegas = {round(float(row['omega']), 12) for row in existing_rows}
+
+    new_rows = []
+
+    for row in rows:
+        omega_key = round(float(row['omega']), 12)
+
+        if omega_key not in existing_omegas:
+            new_rows.append(row)
+
+    combined_rows = existing_rows + new_rows
+    combined_rows.sort(key = lambda row: float(row['omega']), reverse = True)
+
+    formatted_rows = [format_csv_row(row) for row in combined_rows]
+
+    with open(csv_path, 'w', newline = '') as f:
+        w = csv.DictWriter(f, fieldnames = fields)
+        w.writeheader()
+        w.writerows(formatted_rows)
+
+    print(f"Loaded {len(existing_rows)} existing rows.")
+    print(f"Added {len(new_rows)} new rows.")
+    print(f"Total rows in numerical CSV: {len(combined_rows)}.")
+
+else:
+    print(f"No existing numerical CSV found.")
+    print(f"Creating new numerical CSV: {csv_path}...")
+
+    rows.sort(key = lambda row: float(row['omega']), reverse = True)
+
+    formatted_rows = [format_csv_row(row) for row in rows]
+
+    with open(csv_path, 'w', newline = '') as f:
+        w = csv.DictWriter(f, fieldnames = fields)
+        w.writeheader()
+        w.writerows(formatted_rows)
+
+    print(f'Wrote {len(rows)} rows to {csv_path}')
 
 if not args.post_processing:
     print("Post-processing not requested. Numerical CSV saved, solver finished.")
