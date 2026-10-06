@@ -21,7 +21,7 @@ plt.rcParams.update({
 #mode is value of l, omega is value of omega and check is included to check system initialises correctly
 parser = argparse.ArgumentParser(description = "Train PINN for specific mode l")
 parser.add_argument('--mode', type = int, required = True, help = 'The value of l (mode)')
-parser.add_argument('--omega', type = float, required = True, help = 'Incident wave frequency')
+parser.add_argument('--omega_start', type = float, required = True, help = 'Incident wave frequency')
 parser.add_argument('--check', action = 'store_true', help = 'Run a quick sanity check and exit without training')
 
 args = parser.parse_args()
