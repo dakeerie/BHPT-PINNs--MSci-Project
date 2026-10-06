@@ -39,8 +39,8 @@ if args.omega_start < args.omega_final:
 
 #Frequency schedule from high to low for continuation
 omega_schedule = np.linspace(args.omega_start, args.omega_final, args.num_steps)
-
-print(f"Initialising training for omega = {omega_schedule}")
+omega_min = float(args.omega_final)
+omega_max = float(args.omega_start)
 
 # mode = 2
 # omega = 0.3
@@ -51,7 +51,7 @@ NP_DTYPE = np.float32 if DTYPE == t.float32 else np.float64
 
 #GPU capabilities
 device = t.device('cuda' if t.cuda.is_available() else 'cpu')
-t.set_num_threads(4)
+t.set_num_threads(1)
 print(f"Using device: {device}", flush = True)
 
 #Set up domain and BH mass
@@ -149,7 +149,7 @@ def A(x):
 
 def B(x, M, omega):
     real = (1 - x)*(1 - 3*x)
-    imag = -4*M*omega*t.ones_like(x)
+    imag = -4*M*omega
     return real, imag
         
 def C(x, l):
@@ -162,6 +162,10 @@ def g(x, M):
 #Coefficients obtained via Taylor expansion of u_1 at x = 0 (regular singular point)
 def taylor_coeffs(mass, mode, omega):
     Lambda = mode*(mode + 1)
+
+    if not t.is_tensor(omega):
+        omega = t.as_tensor(omega, dtype = DTYPE, device = device)
+
     Omega = 4*mass*omega
     c1 = (Lambda - 3)/(1 - 1j*Omega)
     c2 = ((Lambda + 1)*c1 + 3)/(4 - 1j*2*Omega)
@@ -176,9 +180,35 @@ def annealing(epoch, total_epochs):
     lambda_flux = lambda_final + 0.5*(lambda_initial - lambda_final)*(1 + np.cos(np.pi*progress))
     return lambda_flux
 
+#Omega training input helper functions
+def scale_omega(omega):
+    return 2.0*(omega - omega_min)/(omega_max - omega_min) - 1.0
+
+def prepare_omega_tensor(omega, reference_tensor):
+
+    if t.is_tensor(omega):
+        omega_tensor = omega.to(device = reference_tensor.device, dtype = reference_tensor.dtype)
+
+        if omega_tensor.ndim == 0:
+            omega_tensor = omega_tensor.expand_as(reference_tensor)
+
+        elif omega_tensor.shape != reference_tensor.shape:
+            if omega_tensor.numel() == reference_tensor.numel():
+                omega_tensor = omega_tensor.reshape_as(reference_tensor)
+
+            else:
+                raise ValueError(f"omega shape {omega_tensor.shape} does not match x shape {reference_tensor.shape}")
+
+    else:
+        omega_tensor = t.full_like(reference_tensor, float(omega))
+
+    return omega_tensor
+
+print(f"Initialising training for omega = {omega_schedule}")
+
 beta_dist = dist.Beta(t.tensor([0.6], dtype = DTYPE, device = device), t.tensor([0.1], dtype = DTYPE, device = device))
 
-def sample_training_points(n_points, x_max, dtype, device):
+def sample_x_points(n_points, x_max, dtype, device):
     n_uniform = int(0.6*n_points)
     n_edges = n_points - n_uniform
 
@@ -187,22 +217,52 @@ def sample_training_points(n_points, x_max, dtype, device):
 
     return t.cat([x_uniform, x_edges], dim = 0)
 
+def sample_frequency_batch(omega_values, n_points_per_frequency, x_max, dtype, device, rar_points_by_omega = None):
+
+    x_batches = []
+    omega_batches = []
+
+    for omega in omega_values:
+        x_base = sample_x_points(n_points_per_frequency, x_max, dtype, device)
+
+        key = round(float(omega), 4)
+
+        if (rar_points_by_omega is not None and key in rar_points_by_omega and rar_points_by_omega[key].numel() > 0):
+            x_slice = t.cat([x_base, rar_points_by_omega[key]], dim = 0)
+
+        else:
+            x_slice = x_base
+
+        omega_slice = t.full_like(x_slice, float(omega))
+
+        x_batches.append(x_slice)
+        omega_batches.append(omega_slice)
+
+    x_tensor = t.cat(x_batches, dim = 0)
+    omega_tensor = t.cat(omega_batches, dim = 0)
+
+    x_tensor.requires_grad_(True)
+
+    return x_tensor, omega_tensor
+
 def ode_residual_score(model, x_tensor, mass, mode,  omega, chunk_size = 2000):
     """Evaluate |R_re|^2 + |R_im|^2 on candidate points.
     The candidate points are processed  in chunks to limit memory usage as second derivatives are involved.
     """
 
+    omega_tensor = prepare_omega_tensor(omega, x_tensor)
+
     scores = []
-    for x_chunk in x_tensor.split(chunk_size):
+    for x_chunk, omega_chunk in zip(x_tensor.split(chunk_size), omega_tensor.split(chunk_size)):
         x_chunk = x_chunk.detach().clone().requires_grad_(True)
 
-        u_re, u_im, *_ = ansatz(model, x_chunk, mass, mode, omega)
+        u_re, u_im, *_ = ansatz(model, x_chunk, mass, mode, omega_chunk)
 
         du_re, d2u_re = grads(u_re, x_chunk)
         du_im, d2u_im = grads(u_im, x_chunk)
 
         A_ = A(x_chunk)
-        B_re, B_im = B(x_chunk, mass, omega)
+        B_re, B_im = B(x_chunk, mass, omega_chunk)
         C_ = C(x_chunk, mode)
 
         res_re = A_*d2u_re + B_re*du_re - B_im*du_im + C_*u_re
@@ -216,7 +276,7 @@ def ode_residual_score(model, x_tensor, mass, mode,  omega, chunk_size = 2000):
 def select_rar_points(model, n_candidates, n_add, x_max, mass, mode, omega, device, dtype, existing_rar_points = None, min_dx = 1e-3):
     """Sample candidate points, rank them by ODE residual and retain the highest-residual points subject to a minimum separation in x."""
 
-    x_candidates = sample_training_points(n_candidates, x_max, dtype, device)
+    x_candidates = sample_x_points(n_candidates, x_max, dtype, device)
     scores = ode_residual_score(model, x_candidates, mass, mode, omega)
 
     n_add = min(n_add, x_candidates.shape[0])
@@ -267,12 +327,20 @@ def select_rar_points(model, n_candidates, n_add, x_max, mass, mode, omega, devi
 #Ansatz is of the form u(x) = 1 + c1*x + c2*x**2 + 100*(P + exp(2i*omega*r_star)*Q) 
 #where P and Q are complex with components corresponding to the four channel neural network output
 def ansatz(model, x_tensor, mass, mode, omega):
-    c1_re, c1_im, c2_re, c2_im = taylor_coeffs(mass, mode, omega)
-    NN = model(x_tensor)
+
+    omega_tensor = prepare_omega_tensor(omega, x_tensor)
+
+    c1_re, c1_im, c2_re, c2_im = taylor_coeffs(mass, mode, omega_tensor)
+
+    omega_scaled = scale_omega(omega)
+
+    NN_input = t.cat([x_tensor, omega_scaled], dim = 1)
+    NN = model(NN_input)
+
     P_re, P_im, Q_re, Q_im = NN[:, 0:1], NN[:, 1:2], NN[:, 2:3], NN[:, 3:4]
     x_safe = x_tensor.clamp(min = 1e-12, max = 1 - 1e-3)
     rstar = 2*mass/(1 - x_safe) + 2*mass*t.log(x_safe/(1 - x_safe))
-    cs, sn = t.cos(2*omega*rstar), t.sin(2*omega*rstar)
+    cs, sn = t.cos(2*omega_tensor*rstar), t.sin(2*omega_tensor*rstar)
 
     u_re = 1 + c1_re*x_tensor + c2_re*x_tensor**2 + 100.0*x_tensor**3*(P_re + Q_re*cs - Q_im*sn)
     u_im = c1_im*x_tensor + c2_im*x_tensor**2 + 100.0*x_tensor**3*(P_im + Q_im*cs + Q_re*sn)
@@ -347,10 +415,25 @@ def extraction(model, x_extraction, mass, mode, omega):
 
     return alpha, beta, prob, gbf
 
+def query_gbf(model, omega_query, mass, mode, x_extract):
+
+    if np.isscalar(omega_query):
+        alpha, beta, prob, gbf = extraction(model, x_extract, mass, mode, float(omega_query))
+        return alpha, beta, prob, gbf
+
+    else:
+        results = []
+
+        for omega in np.asarray(omega_query).flatten():
+            alpha, beta, prob, gbf = extraction(model, x_extract, mass, mode, float(omega))
+            results.append({'omega': float(omega), 'alpha': alpha, 'beta': beta, 'probability': prob, 'gbf': gbf})
+            return results
+
+
 #Setup PINN logistics
 #Seed included for reproducibility
 t.manual_seed(0)
-model = Model(1, 4, 32, num_hidden_layers = 3).to(device = device, dtype = DTYPE)
+model = Model(2, 4, 32, num_hidden_layers = 3).to(device = device, dtype = DTYPE)
 GBF_global = {}
 
 resume_path = os.path.join(f"./GBFWSRARData/l{mode}", "latest_warm_start_checkpoint.pth")
@@ -381,6 +464,9 @@ if args.resume and os.path.exists(resume_path):
 
     if not np.isclose(checkpoint['x_max'], x_max):
         raise ValueError("Checkpoint x_max does not match current run.")
+
+    if checkpoint['model_architecture']['in_channels'] != 2:
+        raise ValueError("Checkpoint was trained with a one-input model- current training is using a two-input model.")
 
     model.load_state_dict(checkpoint['model_state_dict'])
     loaded_GBF_global = checkpoint.get("GBF_global", {})
@@ -454,27 +540,26 @@ for step_idx in range(start_step, len(omega_schedule)):
     RAR_ADD = 250             # worst residual points added per refinement
     RAR_MAX = 2000            # maximum number of retained RAR points
     RAR_MIN_DX = 1e-4
+    FREQUENCIES_PER_BATCH = min(4, len(omega_schedule))
+    N_POINTS_PER_FREQUENCY = N_points//FREQUENCIES_PER_BATCH
 
     # RAR points are frequency-specific
-    rar_points = t.empty((0, 1), dtype=DTYPE, device=device)
+    rar_points_by_omega = {round(float(omega), 4): t.empty((0, 1), dtype = DTYPE, device = device) for omega in omega_schedule}
 
     #Adam loop
     for epoch in range(adam_iterations):
-        optimiser.zero_grad(set_to_none = True)
 
-        x_base = sample_training_points(N_points, x_max, dtype = DTYPE, device = device)
+        frequency_indices = t.randperm(len(omega_schedule), device = device)[:FREQUENCIES_PER_BATCH]
 
-        if rar_points.numel() > 0:
-            x_tensor = t.cat([x_base, rar_points], dim = 0)
-        else:
-            x_tensor = x_base
+        batch_omegas = [float(omega_schedule[i]) for i in frequency_indices.cpu().numpy()]
 
-        x_tensor.requires_grad_(True)
+        x_tensor, omega_tensor = sample_frequency_batch(omega_values = batch_omegas, n_points_per_frequency = N_POINTS_PER_FREQUENCY, x_max = x_max, dtype = DTYPE, device = device,
+                                rar_points_by_omega = rar_points_by_omega)
 
         flux_weight = annealing(epoch, adam_iterations)
         hist_weight.append(flux_weight)
         (Re_u_nn, Im_u_nn, flux_res, loss, loss_f, loss_o, 
-        loss_ode_real, loss_ode_imag, res_ode_re, res_ode_im, P_re, P_im, Q_re, Q_im) = compute_loss(model, x_tensor, mass, mode, omega, flux_weight)
+        loss_ode_real, loss_ode_imag, res_ode_re, res_ode_im, P_re, P_im, Q_re, Q_im) = compute_loss(model, x_tensor, mass, mode, omega_tensor, flux_weight)
 
         loss.backward()
         optimiser.step()
@@ -563,24 +648,35 @@ for step_idx in range(start_step, len(omega_schedule)):
                 os.path.join(base_path, 'checkpoint_latest.pth'))
 
                 #Residual-based adapative refinement using the complex ODE residual
-                if (epoch + 1) % RAR_INTERVAL == 0 and (epoch + 1) < adam_iterations and  rar_points.shape[0] < RAR_MAX:
-                    n_add = min(RAR_ADD, RAR_MAX - rar_points.shape[0])
+
+                if ((epoch + 1) % RAR_INTERVAL == 0 and (epoch + 1) < adam_iterations):
 
                     print("-"*60)
-                    print(f"RAR triggered at Adam epoch {epoch + 1}: Testing {RAR_CANDIDATES} candidate points...")
+                    print(f"RAR triggered at Adam epoch {epoch + 1}: Refining the frequencies in this batch...")
 
-                    new_rar_points, new_rar_scores = select_rar_points(model = model, n_candidates = RAR_CANDIDATES, n_add = n_add, x_max = x_max, 
-                        mass = mass, mode = mode, omega = omega, device = device, dtype = DTYPE, existing_rar_points = rar_points, min_dx = RAR_MIN_DX)
-                    rar_points = t.cat([rar_points, new_rar_points], dim = 0)
+                for omega in batch_omegas:
+
+                    key = round(float(omega), 4)
+
+                    current_rar_points = rar_points_by_omega[key]
+                    if current_rar_points.shape[0] >= RAR_MAX:
+                        continue
+
+                    n_add = min(RAR_ADD, RAR_MAX - current_rar_points.shape[0])
+
+                    new_rar_points, new_rar_scores = select_rar_points(model = model, n_candidates = RAR_CANDIDATES, n_add = n_add, x_max = x_max,
+                        mass = mass, mode = mode, omega = omega, device = device, dtype = DTYPE, existing_rar_points = current_rar_points, min_dx = RAR_MIN_DX)
+
+                    rar_points_by_omega[key] = t.cat([current_rar_points, new_rar_points], dim = 0)
 
                     actual_added = new_rar_points.shape[0]
-                    print(f"Added {actual_added} RAR points (requested {n_add}). Total RAR points = {rar_points.shape[0]}")
-                    print(f"Minimum allowed dx = {RAR_MIN_DX:.2e}")
+
+                    print(f"omega = {omega:.4f}: added {actual_added} RAR points (requested {n_add}). Total RAR points = {rar_points_by_omega[key].shape[0]}")
 
                     if actual_added > 0:
                         print(f"Maximum selected ODE residual = {new_rar_scores.max().item():.4e}")
-                        print(f"RAR x range = [{new_rar_points.min().item():.6f}, {new_rar_points.max().item():.6f}]")
-                    else: print("No RAR candidates satisfied the minimum dx condition.")
+                        print(f"RAR x range = [{new_rar_points.min().item():.6f}, {new_rar_points.ax().item():.6f}]")
+
                     print("-"*60)
 
     plt.figure()
@@ -596,14 +692,17 @@ for step_idx in range(start_step, len(omega_schedule)):
     print("="*60)
     lbfgs_optimiser = optim.LBFGS(model.parameters(), lr = 1.0, max_iter = 20,  history_size = 50, line_search_fn = "strong_wolfe")
 
-    x_base_lbfgs = sample_training_points(N_points, x_max, dtype = DTYPE, device = device)
 
-    if rar_points.numel() > 0:
-        x_tensor_lbfgs = t.cat([x_base_lbfgs, rar_points], dim = 0)
-    else:
-        x_tensor_lbfgs = x_base_lbfgs
+    lbfgs_frequencies = min(5, len(omega_schedule))
+    lbfgs_points_per_frequency = N_points//lbfgs_frequencies
+    x_base_lbfgs = sample_x_points(N_points, x_max, dtype = DTYPE, device = device)
 
-    x_tensor_lbfgs.requires_grad_(True)
+    lbfgs_frequency_indices = np.linspace(0, len(omega_schedule) - 1, lbfgs_frequencies, dtype = int)
+    lbfgs_omegas = [float(omega_schedule[i]) for i in lbfgs_frequency_indices]
+    plot_omega = lbfgs_omegas[len(lbfgs_omegas)//2]
+
+    x_tensor_lbfgs, omega_tensor_lbfgs = sample_frequency_batch(omega_values = lbfgs_omegas, n_points_per_frequency = lbfgs_points_per_frequency, x_max = x_max,
+                                            dtype = DTYPE, device = device, rar_points_by_omega = rar_points_by_omega)
 
     flux_weight = annealing(adam_iterations - 1, adam_iterations)
 
@@ -616,7 +715,7 @@ for step_idx in range(start_step, len(omega_schedule)):
         def closure():
             lbfgs_optimiser.zero_grad(set_to_none = True)
             (Re_u_nn, Im_u_nn, flux_res, loss, loss_f, loss_o, loss_ode_re, loss_ode_im,
-            res_ode_re, res_ode_im, P_re, P_im, Q_re, Q_im) = compute_loss(model, x_tensor_lbfgs, mass, mode, omega, flux_weight)
+            res_ode_re, res_ode_im, P_re, P_im, Q_re, Q_im) = compute_loss(model, x_tensor_lbfgs, mass, mode, omega_tensor_lbfgs, flux_weight)
             loss.backward()
 
             info.update({'total': loss.item(), 'flux': loss_f.item(), 'ode': loss_o.item(), 'loss_re': loss_ode_re.item(), 'loss_im': loss_ode_im.item()})
@@ -636,7 +735,7 @@ for step_idx in range(start_step, len(omega_schedule)):
 
         lbfgs_optimiser.step(closure)
 
-        with_grad = compute_loss(model, x_tensor_lbfgs, mass, mode, omega, flux_weight)
+        with_grad = compute_loss(model, x_tensor_lbfgs, mass, mode, omega_tensor_lbfgs, flux_weight)
         _, _, _, loss_now, lf_now, lo_now, lre, lim, *_ = with_grad
         info.update({'total': loss_now.item(), 'flux': lf_now.item(), 'ode': lo_now.item(), 'loss_re': lre.item(), 'loss_im': lim.item()})
 
@@ -665,7 +764,9 @@ for step_idx in range(start_step, len(omega_schedule)):
                             Current value of GBF: {gbf}.""", flush = True)
                 print("-"*60, flush = True)
 
-                x_plot = plot_data['x'].flatten()
+                x_plot = sample_x_points(N_points, x_max, dtype = DTYPE, device = device)
+                x_plot = x_plot.cpu().detach().numpy()
+                omega_plot = t.full_like(x_plot, plot_omega)
                 idx = np.argsort(x_plot)
         
                 plt.figure()
@@ -886,7 +987,8 @@ for step_idx in range(start_step, len(omega_schedule)):
         f.write(f"GBF = {final_gbf:.10e}\n")
 
     checkpoint = {'model_state_dict': model.state_dict(),
-            'model_architecture': {'in_channels': 1, 'out_channels': 4, 'hidden_channels': 32,  'hidden_layers': 3},
+            'model_architecture': {'in_channels': 2, 'out_channels': 4, 'hidden_channels': 32,  'hidden_layers': 3},
+            'omega_input_scaling': {'omega_min': omega_min, 'omega_max': omega_max},
             'rar_config': {'interval': RAR_INTERVAL,
                     'candidates': RAR_CANDIDATES,
                     'add_per_refinement': RAR_ADD,
