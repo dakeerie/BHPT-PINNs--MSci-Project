@@ -51,7 +51,7 @@ NP_DTYPE = np.float32 if DTYPE == t.float32 else np.float64
 
 #GPU capabilities
 device = t.device('cuda' if t.cuda.is_available() else 'cpu')
-t.set_num_threads(4)
+t.set_num_threads(1)
 print(f"Using device: {device}", flush = True)
 
 #Set up domain and BH mass
