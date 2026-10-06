@@ -41,7 +41,7 @@ t.set_num_threads(4)
 print(f"Using device: {device}", flush = True)
 
 #Make various directories for saving results
-base_path = f'./GBF/GBFData/l{mode}/omega{omega}'
+base_path = f'./GBFData/l{mode}/omega{omega}'
 out_dir = os.path.join(base_path, 'NNOutput')
 loss_dir = os.path.join(base_path, 'Loss')
 flux_dir = os.path.join(base_path, 'Flux')
@@ -56,8 +56,8 @@ os.makedirs(final_plots_dir, exist_ok = True)
 epsilon = 1e-8
 mass = 0.5
 x_max = 0.95 
-rstar_max = r_to_rstar(x_to_r(x_max, mass), mass)
-rstar_max_tensor = t.tensor(rstar_max, requires_grad = True, dtype = DTYPE, device = device).view(-1, 1)
+# rstar_max = r_to_rstar(x_to_r(x_max, mass), mass)
+# rstar_max_tensor = t.tensor(rstar_max, requires_grad = True, dtype = DTYPE, device = device).view(-1, 1)
 
 #Useful quantities
 # O = 4*mass*omega
@@ -634,7 +634,6 @@ plt.legend()
 plt.grid()
 plt.tight_layout()
 
-plt.figure()
 plt.subplot(1, 2, 2)
 plt.plot(r_plot[idx], plot_data['P_re'].flatten()[idx], label = 'Re(P)')
 plt.plot(r_plot[idx], plot_data['P_im'].flatten()[idx], label = 'Im(P)')
@@ -686,7 +685,6 @@ plt.legend()
 plt.grid()
 plt.tight_layout()
 
-plt.figure()
 plt.subplot(1, 2, 2)
 plt.plot(r_plot[idx], plot_data['res_re'].flatten()[idx], label = 'Re(res)')
 plt.plot(r_plot[idx], plot_data['res_im'].flatten()[idx], label = 'Im(res)')
@@ -778,10 +776,11 @@ R = final_beta/final_alpha
 
 result_file_path = os.path.join(base_path, 'result.txt')
 with open(result_file_path, 'w') as f:
-    f.write(f"l = {int(mode)}")
-    f.write(f"omega = {omega}")
-    f.write(f"final ODE loss = {info['ode']:.4e}")
-    f.write(f"final flux loss = {info['flux']:.4e}")
+    f.write(f"Regular\n")
+    f.write(f"l = {int(mode)}\n")
+    f.write(f"omega = {omega}\n")
+    f.write(f"final ODE loss = {info['ode']:.4e}\n")
+    f.write(f"final flux loss = {info['flux']:.4e}\n")
     f.write(f"alpha_re = {final_alpha.real:.10f}\n")
     f.write(f"alpha_im = {final_alpha.imag:.10f}\n")
     f.write(f"beta_re = {final_beta.real:.10f}\n")
