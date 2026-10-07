@@ -427,7 +427,8 @@ def query_gbf(model, omega_query, mass, mode, x_extract):
         for omega in np.asarray(omega_query).flatten():
             alpha, beta, prob, gbf = extraction(model, x_extract, mass, mode, float(omega))
             results.append({'omega': float(omega), 'alpha': alpha, 'beta': beta, 'probability': prob, 'gbf': gbf})
-            return results
+    
+    return results
 
 
 #Setup PINN logistics
@@ -436,67 +437,67 @@ t.manual_seed(0)
 model = Model(2, 4, 32, num_hidden_layers = 3).to(device = device, dtype = DTYPE)
 GBF_global = {}
 
-resume_path = os.path.join(f"./GBFWSRARData/l{mode}", "latest_warm_start_checkpoint.pth")
-start_step = 0
+# resume_path = os.path.join(f"./GBFWSRARData/l{mode}", "latest_warm_start_checkpoint.pth")
+# start_step = 0
 
-if args.resume and not os.path.exists(resume_path):
-    print("No previously trained model found. Initialising standard training...")
-    print("-"*60)
+# if args.resume and not os.path.exists(resume_path):
+#     print("No previously trained model found. Initialising standard training...")
+#     print("-"*60)
 
-if args.resume and os.path.exists(resume_path):
-    print("Previous model exists...")
-    print(f"Loading warm start checkpoint {resume_path}", flush = True)
-    print('-'*60)
+# if args.resume and os.path.exists(resume_path):
+#     print("Previous model exists...")
+#     print(f"Loading warm start checkpoint {resume_path}", flush = True)
+#     print('-'*60)
 
-    checkpoint = t.load(resume_path, map_location = device, weights_only = False)
+#     checkpoint = t.load(resume_path, map_location = device, weights_only = False)
 
-    if checkpoint['mode'] != mode:
-        raise ValueError(f"Checkpoint is for l = {checkpoint['mode']}, current run requested l={mode}.")
+#     if checkpoint['mode'] != mode:
+#         raise ValueError(f"Checkpoint is for l = {checkpoint['mode']}, current run requested l={mode}.")
 
-    if checkpoint.get('checkpoint_type') != 'completed_frequency':
-        raise ValueError("Resume checkpoint is not marked as a completed frequency checkpoint.")
+#     if checkpoint.get('checkpoint_type') != 'completed_frequency':
+#         raise ValueError("Resume checkpoint is not marked as a completed frequency checkpoint.")
 
-    if not checkpoint.get('training_complete', False):
-        raise ValueError("Resume checkpoint is not marked as fully trained.")
+#     if not checkpoint.get('training_complete', False):
+#         raise ValueError("Resume checkpoint is not marked as fully trained.")
 
-    if not np.isclose(checkpoint['mass'], mass):
-        raise ValueError("Checkpoint mass does not match current run.")
+#     if not np.isclose(checkpoint['mass'], mass):
+#         raise ValueError("Checkpoint mass does not match current run.")
 
-    if not np.isclose(checkpoint['x_max'], x_max):
-        raise ValueError("Checkpoint x_max does not match current run.")
+#     if not np.isclose(checkpoint['x_max'], x_max):
+#         raise ValueError("Checkpoint x_max does not match current run.")
 
-    if checkpoint['model_architecture']['in_channels'] != 2:
-        raise ValueError("Checkpoint was trained with a one-input model- current training is using a two-input model.")
+#     if checkpoint['model_architecture']['in_channels'] != 2:
+#         raise ValueError("Checkpoint was trained with a one-input model- current training is using a two-input model.")
 
-    model.load_state_dict(checkpoint['model_state_dict'])
-    loaded_GBF_global = checkpoint.get("GBF_global", {})
+#     model.load_state_dict(checkpoint['model_state_dict'])
+#     loaded_GBF_global = checkpoint.get("GBF_global", {})
 
-    if isinstance(loaded_GBF_global, dict):
-        GBF_global = loaded_GBF_global
+#     if isinstance(loaded_GBF_global, dict):
+#         GBF_global = loaded_GBF_global
 
-    else:
-        old_schedule = checkpoint.get("omega_schedule", [])
+#     else:
+#         old_schedule = checkpoint.get("omega_schedule", [])
 
-        if len(old_schedule) != len(loaded_GBF_global):
-            raise ValueError("Old checkpoint contains list-based GBF_global but its omega_schedule is incompatible.")
+#         if len(old_schedule) != len(loaded_GBF_global):
+#             raise ValueError("Old checkpoint contains list-based GBF_global but its omega_schedule is incompatible.")
 
-        GBF_global = {round(float(omega), 4): float(gbf) for omega, gbf in zip(old_schedule, loaded_GBF_global)}
+#         GBF_global = {round(float(omega), 4): float(gbf) for omega, gbf in zip(old_schedule, loaded_GBF_global)}
 
-    completed_omegas = set(GBF_global.keys())
+#     completed_omegas = set(GBF_global.keys())
 
-    remaining_steps = [i for i, omega in enumerate(omega_schedule) if round(float(omega), 4) not in completed_omegas]
+#     remaining_steps = [i for i, omega in enumerate(omega_schedule) if round(float(omega), 4) not in completed_omegas]
 
-    if len(remaining_steps) == 0:
-        start_step = len(omega_schedule)
-        print("No frequencies remaining in the schedule.")
-    else:
-        start_step = remaining_steps[0]
-        print(f"Next omega = {omega_schedule[start_step]:.4f}")
+#     if len(remaining_steps) == 0:
+#         start_step = len(omega_schedule)
+#         print("No frequencies remaining in the schedule.")
+#     else:
+#         start_step = remaining_steps[0]
+#         print(f"Next omega = {omega_schedule[start_step]:.4f}")
 
-    print(f"Resuming from  omega = {checkpoint['omega']:.4f}", flush = True)
+#     print(f"Resuming from  omega = {checkpoint['omega']:.4f}", flush = True)
 
-    # if start_step < len(omega_schedule):
-    #     print(f"Next omega = {omega_schedule[start_step]:.4f}")
+#     # if start_step < len(omega_schedule):
+#     #     print(f"Next omega = {omega_schedule[start_step]:.4f}")
 
 for step_idx in range(start_step, len(omega_schedule)):
     omega = float(omega_schedule[step_idx])
@@ -652,30 +653,31 @@ for step_idx in range(start_step, len(omega_schedule)):
                 if ((epoch + 1) % RAR_INTERVAL == 0 and (epoch + 1) < adam_iterations):
 
                     print("-"*60)
-                    print(f"RAR triggered at Adam epoch {epoch + 1}: Refining the frequencies in this batch...")
+                    print(f"RAR triggered at Adam epoch {epoch + 1}. Refining the frequencies in this batch...")
 
-                for omega in batch_omegas:
+                    for omega in batch_omegas:
 
-                    key = round(float(omega), 4)
+                        key = round(float(omega), 4)
 
-                    current_rar_points = rar_points_by_omega[key]
-                    if current_rar_points.shape[0] >= RAR_MAX:
-                        continue
+                        current_rar_points = rar_points_by_omega[key]
 
-                    n_add = min(RAR_ADD, RAR_MAX - current_rar_points.shape[0])
+                        if current_rar_points.shape[0] >= RAR_MAX:
+                            continue
 
-                    new_rar_points, new_rar_scores = select_rar_points(model = model, n_candidates = RAR_CANDIDATES, n_add = n_add, x_max = x_max,
-                        mass = mass, mode = mode, omega = omega, device = device, dtype = DTYPE, existing_rar_points = current_rar_points, min_dx = RAR_MIN_DX)
+                        n_add = min(RAR_ADD, RAR_MAX - current_rar_points.shape[0])
 
-                    rar_points_by_omega[key] = t.cat([current_rar_points, new_rar_points], dim = 0)
+                        new_rar_points, new_rar_scores = select_rar_points(model = model, n_candidates = RAR_CANDIDATES, n_add = n_add, x_max = x_max,
+                            mass = mass, mode = mode, omega = omega, device = device, dtype = DTYPE, existing_rar_points = current_rar_points, min_dx = RAR_MIN_DX)
 
-                    actual_added = new_rar_points.shape[0]
+                        rar_points_by_omega[key] = t.cat([current_rar_points, new_rar_points], dim = 0)
 
-                    print(f"omega = {omega:.4f}: added {actual_added} RAR points (requested {n_add}). Total RAR points = {rar_points_by_omega[key].shape[0]}")
+                        actual_added = new_rar_points.shape[0]
 
-                    if actual_added > 0:
-                        print(f"Maximum selected ODE residual = {new_rar_scores.max().item():.4e}")
-                        print(f"RAR x range = [{new_rar_points.min().item():.6f}, {new_rar_points.ax().item():.6f}]")
+                        print(f"omega = {omega:.4f}: added {actual_added} RAR points (requested {n_add}). Total RAR points = {rar_points_by_omega[key].shape[0]}")
+
+                        if actual_added > 0:
+                            print(f"Maximum selected ODE residual = {new_rar_scores.max().item():.4e}")
+                            print(f"RAR x range = [{new_rar_points.min().item():.6f}, {new_rar_points.max().item():.6f}]")
 
                     print("-"*60)
 
@@ -692,10 +694,8 @@ for step_idx in range(start_step, len(omega_schedule)):
     print("="*60)
     lbfgs_optimiser = optim.LBFGS(model.parameters(), lr = 1.0, max_iter = 20,  history_size = 50, line_search_fn = "strong_wolfe")
 
-
     lbfgs_frequencies = min(5, len(omega_schedule))
     lbfgs_points_per_frequency = N_points//lbfgs_frequencies
-    x_base_lbfgs = sample_x_points(N_points, x_max, dtype = DTYPE, device = device)
 
     lbfgs_frequency_indices = np.linspace(0, len(omega_schedule) - 1, lbfgs_frequencies, dtype = int)
     lbfgs_omegas = [float(omega_schedule[i]) for i in lbfgs_frequency_indices]
