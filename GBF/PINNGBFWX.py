@@ -37,6 +37,27 @@ x_max = args.x_extract
 if args.omega_start < args.omega_final:
     raise ValueError("omega_final must be less than omega_start")
 
+if mass <= 0:
+    raise ValueError("mass must be positive.")
+
+if mode < 0:
+    raise ValueError("mode must be non-negative.")
+
+if args.omega_start <= 0 or args.omega_final <= 0:
+    raise ValueError("Both frequencies must be positive.")
+
+if args.omega_start <= args.omega_final:
+    raise ValueError("omega_start must be strictly greater than omega_final.")
+
+if args.num_steps < 1:
+    raise ValueError("num_steps must be at least 1.")
+
+if args.query_steps < 1:
+    raise ValueError("query_steps must be at least 1.")
+
+if not (1e-6 < x_max <= 1.0 - 1e-3):
+    raise ValueError("x_extract must be in (1e-6, 0.999] for the current ansatz clamp.")
+
 #Frequency schedule from high to low for continuation
 omega_schedule = np.linspace(args.omega_start, args.omega_final, args.num_steps)
 omega_min = float(args.omega_final)
@@ -335,7 +356,7 @@ def ansatz(model, x_tensor, mass, mode, omega):
 
     c1_re, c1_im, c2_re, c2_im = taylor_coeffs(mass, mode, omega_tensor)
 
-    omega_scaled = scale_omega(omega)
+    omega_scaled = scale_omega(omega_tensor)
 
     NN_input = t.cat([x_tensor, omega_scaled], dim = 1)
     NN = model(NN_input)
@@ -560,7 +581,7 @@ def save_training_diagnostics(model, epoch_number, omega):
     plt.savefig(os.path.join(pq_dir, f"Epoch_{epoch_number}.png"), format = 'png')
     plt.close()
 
-def load_numerical_gbf(csv_path):
+def load_numerical_gbf(csv_path, mass, mode, x_extract):
     if not os.path.exists(csv_path):
         raise FileNotFoundError(f"Numerical GBF CSV not found: {csv_path}")
 
@@ -569,12 +590,35 @@ def load_numerical_gbf(csv_path):
     with open(csv_path, 'r', newline =  '') as f:
         reader = csv.DictReader(f)
 
-        if 'omega' not in reader.fieldnames or 'GBF' not in reader.fieldnames:
-            raise ValueError(f"Numerical CSV must contain 'omega' or 'GBF'. Found: {reader.fieldnames}")
+        required_columns = {"mass", "mode", "x_extract", "omega", "GBF", "success"}
+        missing_columns = required_columns - set(reader.fieldnames or [])
+
+        if missing_columns:
+            raise ValueError(f"Numerical CSV is missing required columns: {sorted(missing_columns)}")
 
         for row in reader:
+
+            row_mass = float(row["mass"])
+            row_mode = int(row["mode"])
+            row_x_extract = float(row["x_extract"])
+    
+            if not np.isclose(row_mass, mass, rtol = 0.0, atol = 1e-12):
+                continue
+    
+            if row_mode != mode:
+                continue
+
+            if not np.isclose(row_x_extract, x_extract, rtol = 0.0, atol = 1e-12):
+                continue
+
+            if row["success"].strip().lower() not in {"true", "1"}:
+                continue
+            
             omega = float(row['omega'])
             gbf = float(row['GBF'])
+
+            if not np.isfinite(gbf):
+                continue
 
             numerical_results[round(omega, 8)] = gbf
 
@@ -884,7 +928,7 @@ for epoch in range(lbfgs_iterations):
 
     if (epoch + 1) % 40 == 0 or epoch == (lbfgs_iterations - 1):
         #Printing and plotting
-        extraction_epochs.append(epoch + adam_iterations)
+        extraction_epochs.append(global_epoch + 1)
         alpha, beta, prob, gbf = extraction(model, x_max, mass, mode, monitor_omega)
         alphas.append(alpha)
         betas.append(beta)
@@ -919,7 +963,7 @@ with open(training_gbf_path, 'w', newline = '') as f:
     writer.writerow(['omega', 'alpha_re', 'alpha_im', 'beta_re',  'beta_im', 'prob', 'PINN_GBF'])
 
     for result in training_query_results:
-        writer.writerow([f"{result['omega']:.10f}", f"{result['alpha'].real:.12e}", f"{result['alpha'].imag:.12e}", f"{result['beta'].real:12e}", f"{result['beta'].imag:.12e}",
+        writer.writerow([f"{result['omega']:.10f}", f"{result['alpha'].real:.12e}", f"{result['alpha'].imag:.12e}", f"{result['beta'].real:.12e}", f"{result['beta'].imag:.12e}",
                 f"{result['probability']:.12e}", f"{result['gbf']:.12e}"])
 
 GBF_global = {}
@@ -1023,7 +1067,7 @@ numerical_csv_path = f'./Numerical/l{mode}/Output/numericalGBF.csv'
 
 print(f"Loading numerical GBF data from: {numerical_csv_path}")
 
-numerical_results = load_numerical_gbf(numerical_csv_path)
+numerical_results = load_numerical_gbf(numerical_csv_path, mass, mode, x_max)
 
 print(f"Loaded {len(numerical_results)} numerical results.")
 
@@ -1130,7 +1174,7 @@ checkpoint = {'model_state_dict': model.state_dict(),
             'omega_schedule': omega_schedule.tolist(),
             'query_steps': args.query_steps,
             'diagnostic_omegas': diagnostic_omegas,
-            'monitor omega': monitor_omega,
+            'monitor_omega': monitor_omega,
             'x_diagnostic': x_diagnostic.tolist(),
 
             'adam_iterations': adam_iterations,
@@ -1161,7 +1205,7 @@ checkpoint = {'model_state_dict': model.state_dict(),
                                 'absolute_difference': query_absolute_differences.tolist(), 'relative_difference': query_relative_differences.tolist()},
 
             'diagnostic_model_states': diagnostic_model_states,
-
+            'lbfgs_success': bool(lbfgs_success),
             'training_complete': True}
 
 checkpoint_path = os.path.join(checkpoint_dir, f'pinn_conditional_GBFWX_l{mode}.pth')
