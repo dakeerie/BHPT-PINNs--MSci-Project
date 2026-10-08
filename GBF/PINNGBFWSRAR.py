@@ -493,7 +493,7 @@ for step_idx in range(start_step, len(omega_schedule)):
                 probability.append(prob)
                 GBF.append(gbf)
                 if (epoch + 1) % 500 ==0 or epoch == 0:
-                    print(f"""l = {mode}, omega = {omega:.4f} | omega {step_idx} / {len(omega_schedule)} | Adam Epoch: {epoch + 1} / {adam_iterations}. 
+                    print(f"""l = {mode}, omega = {omega:.4f} | omega {step_idx + 1} / {len(omega_schedule)} | Adam Epoch: {epoch + 1} / {adam_iterations}. 
                             Total scaled loss: {loss.item():.4e}, 
                             Flux loss: {loss_f.item():.4e},
                             ODE loss: {loss_o.item():.4e},
@@ -655,7 +655,7 @@ for step_idx in range(start_step, len(omega_schedule)):
                 probability.append(prob)
                 GBF.append(gbf)
                 
-                print(f"""l = {mode}, omega = {omega:.4f} | omega {step_idx} / {len(omega_schedule)} | L-BFGS Epoch: {epoch + 1} / {lbfgs_iterations}. 
+                print(f"""l = {mode}, omega = {omega:.4f} | omega {step_idx + 1} / {len(omega_schedule)} | L-BFGS Epoch: {epoch + 1} / {lbfgs_iterations}. 
                             Total scaled loss: {info['total']:.4e}, 
                             Flux loss: {info['flux']:.4e},
                             ODE loss: {info['ode']:.4e},
