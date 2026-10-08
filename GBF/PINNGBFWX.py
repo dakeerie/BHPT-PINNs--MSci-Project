@@ -26,8 +26,8 @@ parser.add_argument('--mode', type = int, required = True, help = 'The value of 
 parser.add_argument('--x_extract', type = float, required = True, help = "GBF extraction coordinate")
 parser.add_argument('--omega_start', type = float, default = 0.3, help = 'Initial (higher) frequency')
 parser.add_argument('--omega_final', type = float, default = 0.03, help = 'Final (lower) frequency')
-parser.add_argument('--num_steps', type = int, default = 10, help = "Number of warm-start steps")
-parser.add_argument('--resume', action = 'store_true', help = 'Resume from the latest warm-start checkpoint')
+parser.add_argument('--num_steps', type = int, default = 10, help = "Number of training frequency steps")
+parser.add_argument('--query_steps', type = int, default = 200, help = 'Number of frequencies used for dense post-training queries')
 
 args = parser.parse_args()
 mass = args.mass
@@ -464,6 +464,59 @@ def evaluate_fixed_frequency(model, mass, mode, omega, x_values):
     return {'x': x_tensor.detach().cpu().numpy().flatten(), 'u_re': u_re.detach().cpu().numpy().flatten(), 'u_im': u_im.detach().cpu().numpy().flatten(), 'flux': J.detach().cpu().numpy().flatten(),
             'res_re': res_ode_re.detach().cpu().numpy().flatten(), 'res_im': res_ode_im.detach().cpu().numpy().flatten()}
 
+def save_training_diagnostics(model, epoch_number):
+
+    plt.figure(figsize = [7, 5])
+    plt.plot(hist_epochs, hist_total, label = 'Total')
+    plt.plot(hist_epochs, hist_ode, label = 'ODE')
+    plt.plot(hist_epochs, hist_flux, label = 'Flux')
+    plt.plot(hist_epochs, hist_ode_re, label = 'Real ODE')
+    plt.plot(hist_epochs, hist_ode_im, label = 'Imag ODE')
+    plt.yscale('log')
+    plt.xlabel('Epoch', fontsize = 16)
+    plt.ylabel('Loss', fontsize = 16)
+    plt.title(f'Two-input PINN loss, l = {mode}', fontsize = 16)
+    plt.grid()
+    plt.legend()
+    plt.tight_layout()
+    plt.savefig(os.path.join(diagnostic_dir, 'latest_loss.png'), format = 'png')
+    plt.close()
+
+    for omega_diag in diagnostic_omegas:
+        diagnostic_dir_omega = os.path.join(diagnostic_dir, f'omega{omega_diag:.4f}')
+        os.makedirs(diagnostic_dir_omega, exist_ok = True)
+
+        diagnostic = evaluate_fixed_frequency(model, mass, mode, omega_diag, x_diagnostic)
+
+        flux_dir_omega = os.path.join(diagnostic_dir_omega, "Flux")
+        residual_dir_omega = os.path.join(diagnostic_dir_omega, "Residuals")
+        os.makedirs(flux_dir_omega, exist_ok = True)
+        os.makedirs(residual_dir_omega, exist_ok = True)
+
+        plt.figure(figsize = [7, 5])
+        plt.plot(diagnostic['x'], diagnostic['res_re'], label = r"$\Re(R_{ODE})$")
+        plt.plot(diagnostic['x'], diagnostic['res_im'], label = r'$\Im(R_{ODE})$')
+        plt.xlabel('x', fontsize = 16)
+        plt.ylabel('ODE Residual', fontsize = 16)
+        plt.title(f'ODE Residual, l = {mode}, omega = {omega_diag:.4f}')
+        plt.grid()
+        plt.legend()
+        plt.tight_layout()
+        plt.savefig(os.path.join(residual_dir_omega, f"Epoch_{epoch}.png"), format = 'png')
+        plt.close()
+
+        plt.figure(figsize = [7, 5])
+        plt.plot(diagnostic['x'], diagnostic['flux'], label = r'$J(x)$')
+        plt.axhline(0.0, linestyle = '--', label = 'Target')
+        plt.xlabel('x', fontsize = 16)
+        plt.ylabel('Flux Residual', fontsize = 16)
+        plt.title(f'Flux Residual, l = {mode}, omega = {omega_diag:.4f}')
+        plt.grid()
+        plt.legend()
+        plt.tight_layout()
+        plt.savefig(os.path.join(flux_dir_omega, f"Epoch_{epoch}.png"), format = 'png')
+        plt.close()
+
 #Setup PINN logistics
 #Seed included for reproducibility
 t.manual_seed(0)
@@ -538,16 +591,23 @@ model = Model(2, 4, 32, num_hidden_layers = 3).to(device = device, dtype = DTYPE
     #Make various directories for saving results
 base_path = f'./GBFWXData/l{mode}'
 checkpoint_dir = os.path.join(base_path, 'checkpoints')
-diagnostic_dir = os.path.join(base_path, 'diagnositcs')
-training_dir = os.path.join(base_path, 'training')
+diagnostic_dir = os.path.join(base_path, 'diagnostics')
 results_dir = os.path.join(base_path, 'results')
 comparisons_dir = os.path.join(base_path, 'comparisons')
+final_plots_dir = os.path.join(diagnostic_dir, "final")
+
 os.makedirs(base_path, exist_ok=True)
 os.makedirs(checkpoint_dir, exist_ok = True)
 os.makedirs(diagnostic_dir, exist_ok = True)
-os.makedirs(training_dir, exist_ok = True)
 os.makedirs(results_dir, exist_ok = True)
 os.makedirs(comparisons_dir, exist_ok = True)
+os.makedirs(final_plots_dir, exist_ok = True)
+
+loss_history_dir = os.path.join(diagnostic_dir, "loss_history.csv")
+
+with open(loss_history_dir, 'w', newline = '') as f:
+    writer = csv.writer(f)
+    writer.writerow(['epoch', 'stage', 'total_loss', 'flux_loss', 'ode_loss', 'ode_real_loss', 'ode_imag_loss', 'flux_weight'])
 
 # print("="*60, flush = True)
 # print(f"WS step {step_idx + 1} / {len(omega_schedule)} | l = {mode}, omega = {omega:.4f}", flush = True)
@@ -565,7 +625,7 @@ lbfgs_iterations = 1000
 #     print("Continuation frequency- using standard training budget.")
 # print("-"*60)
 
-hist_total, hist_flux, hist_ode, hist_ode_re, hist_ode_im, hist_weight = [], [], [], [], [], []
+hist_epochs, hist_total, hist_flux, hist_ode, hist_ode_re, hist_ode_im, hist_weight = [], [], [], [], [], [], []
 GBF, probability, alphas, betas, extraction_epochs = [], [], [], [], []
 N_points = 10000
 
@@ -601,6 +661,12 @@ for epoch in range(adam_iterations):
     loss.backward()
     optimiser.step()
 
+    with open(loss_history_dir, 'a', newline = '') as f:
+        writer = csv.writer(f)
+
+        writer.writerow([epoch + 1, 'Adam', loss.item(), loss_f.item(), loss_o.item(), loss_ode_real.item(), loss_ode_imag.item(), flux_weight])
+
+    hist_epochs.append(epoch + 1)
     hist_total.append(loss.item())
     hist_flux.append(loss_f.item())
     hist_ode.append(loss_o.item())
@@ -636,7 +702,37 @@ for epoch in range(adam_iterations):
             diagnostic = evaluate_fixed_frequency(model, mass, mode, omega_diag, x_diagnostic)
 
             flux_dir_omega = os.path.join(diagnostic_dir_omega, 'Flux')
+            residual_dir_omega = os.path.join(diagnostic_dir_omega, 'Residuals')
             os.makedirs(flux_dir_omega, exist_ok = True)
+            os.makedirs(residual_dir_omega, exist_ok = True)
+
+            plt.figure([7, 5])
+            plt.plot(hist_total, label = 'Total')
+            plt.plot(hist_ode, label = 'ODE')
+            plt.plot(hist_flux, label = 'Flux')
+            plt.plot(hist_ode_re, label = 'Real ODE')
+            plt.plot(hist_ode_im, label = 'Imag ODE')
+            plt.yscale('log')
+            plt.xlabel('Epoch', fontsize = 16)
+            plt.ylabel('Loss', fontsize = 16)
+            plt.title(f'Two-input PINN Loss, l = {mode}', fontsize = 16)
+            plt.grid()
+            plt.legend()
+            plt.tight_layout()
+            plt.savefig(os.path.join(diagnostic_dir, "latest_loss.png"), format = 'png')
+
+            plt.figure(figsize = [7, 5])
+            plt.plot(diagnostic['x'], diagnostic['res_re'], label = r"$\Re(R_{ODE})$")
+            plt.plot(diagnostic['x'], diagnostic['res_im'], label = r"$\Im(R_{ODE})$")
+            plt.axhline(0.0, linestyle = '--', label = 'Target')
+            plt.xlabel(r'$x$', fontsize = 16)
+            plt.ylabel('ODE Residual', fontsize = 16)
+            plt.title(f'ODE Residual, l = {mode}, omega = {omega_diag:.4f}')
+            plt.grid()
+            plt.legend()
+            plt.tight_layout()
+            plt.savefig(f'{residual_dir_omega}/Epoch{epoch + 1}.png', format = 'png')
+            plt.close()
 
             plt.figure(figsize = [7, 5])
             plt.plot(diagnostic['x'], diagnostic['flux'], label = r"$J(x)$")
@@ -658,72 +754,44 @@ for epoch in range(adam_iterations):
                     f" Flux RMS = {flux_rms:.4e} |"
                     f" Max |Flux| = {flux_max:.4e} |"
                     f" ODE RMS = {ode_rms:.4e}", flush = True)
+
+            x_values, u_re, u_im, P_re, P_im, Q_re, Q_im = query_wavefunction(model, mass, mode, monitor_omega, x_diagnostic)
+
+            wavefunction_dir = os.path.join(diagnostic_dir_omega, 'Wavefunction')
+            os.makedirs(wavefunction_dir, exist_ok = True)
+
+            plt.figure(figsize = [7, 5])
+            plt.plot(x_values, u_re, label = "Re(u)")
+            plt.plot(x_values, u_im, label = "Im(u)")
+            plt.xlabel(r"$x$", fontsize = 16)
+            plt.ylabel(r"$u(x, \omega)$", fontsize = 16)
+            plt.title(f"Wavefunction: l = {mode}, omega = {monitor_omega:.4f}, Epoch = {epoch + 1}", fontsize = 16)
+            plt.grid()
+            plt.legend()
+            plt.tight_layout()
+            plt.savefig(f"{wavefunction_dir}/Epoch_{epoch + 1}.png", format = 'png')
+            plt.close()
+
+            pq_dir = os.path.join(diagnostic_dir_omega, 'PQ')
+            os.makedirs(pq_dir)
+
+            plt.figure(figsize = [7, 5])
+            plt.plot(x_values, P_re, label = 'Re(P)')
+            plt.plot(x_values, P_im, label = 'Im(P)')
+            plt.plot(x_values, Q_re, label = 'Re(Q)')
+            plt.plot(x_values, Q_im, label = 'Im(Q)')
+            plt.xlabel('x')
+            plt.ylabel('P & Q')
+            plt.title(f'P & Q, l = {mode}, omega = {monitor_omega:.4f}')
+            plt.grid()
+            plt.legend()
+            plt.tight_layout()
+            plt.savefig(f'{pq_dir}/PQ_Epoch_{epoch + 1}.png', format = 'png')
+            plt.close()
+
         print("-"*60)
 
-        x_values, u_re, u_im, P_re, P_im, Q_re, Q_im = query_wavefunction(model, mass, mode, monitor_omega, x_diagnostic)
-
-        wavefunction_dir = os.path.join(diagnostic_dir_omega, 'Wavefunction')
-        os.makedirs(wavefunction_dir, exist_ok = True)
-
-        plt.figure(figsize = [7, 5])
-        plt.plot(x_values, u_re, label = "Re(u)")
-        plt.plot(x_values, u_im, label = "Im(u)")
-        plt.xlabel(r"$x$", fontsize = 16)
-        plt.ylabel(r"$u(x, \omega)$", fontsize = 16)
-        plt.title(f"Wavefunction: l = {mode}, omega = {monitor_omega:.4f}, Epoch = {epoch + 1}", fontsize = 16)
-        plt.grid()
-        plt.legend()
-        plt.tight_layout()
-        plt.savefig(f"{wavefunction_dir}/Epoch_{epoch + 1}.png", format = 'png')
-        plt.close()
-
-        plt.figure(figsize = [7, 5])
-        plt.plot(x_values, P_re, label = 'Re(P)')
-        plt.plot(x_values, P_im, label = 'Im(P)')
-        plt.plot(x_values, Q_re, label = 'Re(Q)')
-        plt.plot(x_values, Q_im, label = 'Im(Q)')
-        plt.xlabel('x')
-        plt.ylabel('P & Q')
-        plt.title(f'P & Q, l = {mode}, omega = {monitor_omega:.4f}')
-        plt.grid()
-        plt.legend()
-        plt.tight_layout()
-        plt.savefig(f'{out_dir}/PQ_Epoch_{epoch + 1}.png', format = 'png')
-        plt.close()
-
-    #         plt.figure()
-    #         plt.plot(x_np[idx], res_re_plot[idx], color = 'blue', label = r'$\Re (Res_{ODE})$')
-    #         plt.plot(x_np[idx], res_im_plot[idx], color = 'green', label = r'$\Im (Res_{ODE})$')
-    #         plt.plot(x_np[idx], u_re_plot[idx], color = 'orange', label = r'$\Re (u_{NN})$')
-    #         plt.plot(x_np[idx], u_im_plot[idx], color = 'red', label = r'$\Im (u_{NN})$')
-    #         plt.xlabel('x', fontsize = 25)
-    #         plt.ylabel('Output', fontsize = 25)
-    #         plt.title(f"l = {mode}, omega = {omega:.4f}", fontsize = 20)
-    #         plt.grid()
-    #         plt.legend(fontsize = 15, loc = 'best')
-    #         plt.tight_layout()
-    #         plt.savefig(f'{out_dir}/Output_Epoch_{epoch + 1}.png', format = 'png')
-    #         plt.close()
-    
-    #         plt.figure()
-    #         plt.plot(x_np[idx], flux_plot[idx], color = 'purple', label = 'Flux Residual')
-    #         plt.axhline(0.0, color = 'cyan', linestyle = '--', label = 'Target')
-    #         plt.xlabel('x', fontsize = 25)
-    #         plt.ylabel(r'Flux Residual', fontsize = 25)
-    #         plt.title(f"l = {mode}, omega = {omega:.4f}", fontsize = 20)
-    #         # plt.yscale()
-    #         plt.grid()
-    #         plt.legend(fontsize = 15, loc = 'best')
-    #         plt.tight_layout()
-    #         plt.savefig(f'{flux_dir}/Flux_Residual_Epoch_{epoch + 1}.png', format = 'png')
-    #         plt.close()
-    
-            #Save current checkpoint in case of a crash or blow up 
-            t.save({'model_state_dict': model.state_dict(), 'epoch': epoch,
-                        'GBF': GBF, 'probability': probability},
-            os.path.join(base_path, 'checkpoint_latest.pth'))
-
-            #Residual-based adapative refinement using the complex ODE residual
+#Residual-based adapative refinement using the complex ODE residual
 
     if ((epoch + 1) % RAR_INTERVAL == 0 and (epoch + 1) < adam_iterations):
 
@@ -754,15 +822,6 @@ for epoch in range(adam_iterations):
                 print(f"RAR x range = [{new_rar_points.min().item():.6f}, {new_rar_points.max().item():.6f}]")
 
             print("-"*60)
-
-plt.figure()
-plt.plot(hist_weight)
-plt.xlabel('Epoch')
-plt.ylabel(r'$\lambda_{\mathrm{flux}}$')
-plt.grid()
-plt.tight_layout()
-plt.savefig(f'{final_plots_dir}/FluxWeights.png', format = 'png')
-plt.close()
 
 print("Adam training complete. Switching to L-BFGS:", flush = True)
 print("="*60)
@@ -829,7 +888,7 @@ for epoch in range(lbfgs_iterations):
             GBF.append(gbf)
             
             print(f"""l = {mode} | L-BFGS Epoch: {epoch + 1} / {lbfgs_iterations}. 
-                        Batch omegas = {batch_omegas},
+                        L-BFGS omegas = {lbfgs_omegas},
                         Monitor omega = {monitor_omega:.4f},
                         Total scaled loss: {info['total']:.4e}, 
                         Flux loss: {info['flux']:.4e},
@@ -837,8 +896,7 @@ for epoch in range(lbfgs_iterations):
                         Monitor GBF: {gbf},
                         Monitor |alpha|^2 - |beta|^2: {prob}.""", flush = True)
             print("-"*60, flush = True)
-
-                        
+        
             # x_plot = sample_x_points(N_points, x_max, dtype = DTYPE, device = device)
             # x_plot = x_plot.cpu().detach().numpy()
             # omega_plot = t.full_like(x_plot, plot_omega)
@@ -858,21 +916,21 @@ for epoch in range(lbfgs_iterations):
             # plt.savefig(f'{out_dir}/Output_Epoch_{epoch + 1 + adam_iterations}.png', format = 'png')
             # plt.close()
         
-            # plt.figure()
-            # plt.plot(hist_total, label = 'Total')
-            # plt.plot(hist_flux, label = 'Flux')
-            # plt.plot(hist_ode, label = 'ODE')
-            # plt.plot(hist_ode_re, label = 'Real component')
-            # plt.plot(hist_ode_im, label = 'Imaginary component')
-            # plt.yscale('log')
-            # plt.ylabel('Loss', fontsize = 25)
-            # plt.xlabel('Epoch', fontsize = 25)
-            # plt.title(f"l = {mode}, omega = {omega:.4f}", fontsize = 20)
-            # plt.legend(fontsize = 15, loc = 'best')
-            # plt.grid()
-            # plt.tight_layout()
-            # plt.savefig(f'{loss_dir}/Loss_Epoch_{epoch + 1 + adam_iterations}.png', format = 'png')
-            # plt.close()
+            plt.figure([7, 5])
+            plt.plot(hist_total, label = 'Total')
+            plt.plot(hist_ode, label = 'ODE')
+            plt.plot(hist_flux, label = 'Flux')
+            plt.plot(hist_ode_re, label = 'Real ODE')
+            plt.plot(hist_ode_im, label = 'Imag ODE')
+            plt.yscale('log')
+            plt.xlabel('Epoch', fontsize = 16)
+            plt.ylabel('Loss', fontsize = 16)
+            plt.title(f'Two-input PINN Loss, l = {mode}', fontsize = 16)
+            plt.grid()
+            plt.legend()
+            plt.tight_layout() #For Mr ChatGPT, I don't think the loss histories are updated in the L-BFGS loop so this might not work as required.
+            #I want the same diagnostic plotting that happens in the Adam training to occur for the L-BFGS training, thank you
+            plt.savefig(os.path.join(diagnostic_dir, "latest_loss.png"), format = 'png')
     
             # plt.figure()
             # plt.plot(x_plot[idx], plot_data['flux'].flatten()[idx], color = 'purple', label = 'Flux Residual')
@@ -889,12 +947,22 @@ for epoch in range(lbfgs_iterations):
 
 print("Conditional PINN training complete.", flush = True)
 
-GBF_global = {}
 
 training_query_results = query_gbf(model, mass, mode, omega_schedule, x_max)
 training_omegas = np.array([result['omega'] for result in training_query_results])
 training_gbfs = np.array([result['gbf'] for result in training_query_results])
+training_gbf_path = os.path.join(results_dir, "PINN_training_frequencies.csv")
 
+with open(training_gbf_path, 'w', newline = '') as f:
+    writer = csv.writer(f)
+
+    writer.writerow(['omega', 'alpha_re', 'alpha_im', 'beta_re',  'beta_im', 'prob', 'PINN_GBF'])
+
+    for result in training_query_results:
+        writer.writerow([f"{result['omega']:.10f}", f"{result['alpha'].real:.12e}", f"{result['alpha'].imag:.12e}", f"{result['beta'].real:12e}", f"{result['beta'].imag:.12e}",
+                f"{result['probability']:.12e}", f"{result['gbf']:.12e}"])
+
+GBF_global = {}
 for result in training_query_results:
     key = round(result['omega'], 4)
     GBF_global[key] = result['gbf']
@@ -903,6 +971,17 @@ omega_query = np.linspace(omega_min, omega_max, 200)
 dense_query_results = query_gbf(model, mass, mode, omega_query, x_max)
 dense_query_omegas = np.array([result['omega'] for result in dense_query_results])
 dense_query_gbfs = np.array([result['gbf'] for result in dense_query_results])
+query_gbf_path = os.path.join(results_dir, "PINN_query_frequencies.csv")
+
+with open(query_gbf_path, 'w', newline = '') as f:
+    writer = csv.writer(f)
+
+    writer.writerow(['omega', 'alpha_re', 'alpha_im', 'beta_re',  'beta_im', 'prob', 'PINN_GBF'])
+
+    for result in dense_query_results:
+            writer.writerow([f"{result['omega']:.10f}", f"{result['alpha'].real:.12e}", f"{result['alpha'].imag:.12e}", f"{result['beta'].real:12e}", f"{result['beta'].imag:.12e}",
+                    f"{result['probability']:.12e}", f"{result['gbf']:.12e}"])
+
 
 plt.figure(figsize = [7, 5])
 plt.plot(dense_query_omegas, dense_query_gbfs, label = 'Two-input PINN')
