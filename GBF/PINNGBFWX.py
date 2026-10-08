@@ -345,8 +345,8 @@ def ansatz(model, x_tensor, mass, mode, omega):
     rstar = 2*mass/(1 - x_safe) + 2*mass*t.log(x_safe/(1 - x_safe))
     cs, sn = t.cos(2*omega_tensor*rstar), t.sin(2*omega_tensor*rstar)
 
-    u_re = 1 + c1_re*x_tensor + c2_re*x_tensor**2 + 100.0*x_tensor**3*(P_re + Q_re*cs - Q_im*sn)
-    u_im = c1_im*x_tensor + c2_im*x_tensor**2 + 100.0*x_tensor**3*(P_im + Q_im*cs + Q_re*sn)
+    u_re = 1 + c1_re*x_tensor + c2_re*x_tensor**2 + x_tensor**3*(P_re + Q_re*cs - Q_im*sn)
+    u_im = c1_im*x_tensor + c2_im*x_tensor**2 + x_tensor**3*(P_im + Q_im*cs + Q_re*sn)
     return u_re, u_im, P_re, P_im, Q_re, Q_im
 
 #Current loss function composed of ODE residual and Flux conservation requirement
@@ -464,7 +464,7 @@ def evaluate_fixed_frequency(model, mass, mode, omega, x_values):
     return {'x': x_tensor.detach().cpu().numpy().flatten(), 'u_re': u_re.detach().cpu().numpy().flatten(), 'u_im': u_im.detach().cpu().numpy().flatten(), 'flux': J.detach().cpu().numpy().flatten(),
             'res_re': res_ode_re.detach().cpu().numpy().flatten(), 'res_im': res_ode_im.detach().cpu().numpy().flatten()}
 
-def save_training_diagnostics(model, epoch_number):
+def save_training_diagnostics(model, epoch_number, omega):
 
     plt.figure(figsize = [7, 5])
     plt.plot(hist_epochs, hist_total, label = 'Total')
@@ -482,113 +482,205 @@ def save_training_diagnostics(model, epoch_number):
     plt.savefig(os.path.join(diagnostic_dir, 'latest_loss.png'), format = 'png')
     plt.close()
 
-    for omega_diag in diagnostic_omegas:
-        diagnostic_dir_omega = os.path.join(diagnostic_dir, f'omega{omega_diag:.4f}')
-        os.makedirs(diagnostic_dir_omega, exist_ok = True)
+    diagnostic_dir_omega = os.path.join(diagnostic_dir, f'omega{omega:.4f}')
+    os.makedirs(diagnostic_dir_omega, exist_ok = True)
 
-        diagnostic = evaluate_fixed_frequency(model, mass, mode, omega_diag, x_diagnostic)
+    diagnostic = evaluate_fixed_frequency(model, mass, mode, omega, x_diagnostic)
 
-        flux_dir_omega = os.path.join(diagnostic_dir_omega, "Flux")
-        residual_dir_omega = os.path.join(diagnostic_dir_omega, "Residuals")
-        os.makedirs(flux_dir_omega, exist_ok = True)
-        os.makedirs(residual_dir_omega, exist_ok = True)
+    flux_dir_omega = os.path.join(diagnostic_dir_omega, "Flux")
+    residual_dir_omega = os.path.join(diagnostic_dir_omega, "Residuals")
+    os.makedirs(flux_dir_omega, exist_ok = True)
+    os.makedirs(residual_dir_omega, exist_ok = True)
 
-        plt.figure(figsize = [7, 5])
-        plt.plot(diagnostic['x'], diagnostic['res_re'], label = r"$\Re(R_{ODE})$")
-        plt.plot(diagnostic['x'], diagnostic['res_im'], label = r'$\Im(R_{ODE})$')
-        plt.xlabel('x', fontsize = 16)
-        plt.ylabel('ODE Residual', fontsize = 16)
-        plt.title(f'ODE Residual, l = {mode}, omega = {omega_diag:.4f}')
-        plt.grid()
-        plt.legend()
-        plt.tight_layout()
-        plt.savefig(os.path.join(residual_dir_omega, f"Epoch_{epoch}.png"), format = 'png')
-        plt.close()
+    plt.figure(figsize = [7, 5])
+    plt.plot(diagnostic['x'], diagnostic['res_re'], label = r"$\Re(R_{ODE})$")
+    plt.plot(diagnostic['x'], diagnostic['res_im'], label = r'$\Im(R_{ODE})$')
+    plt.xlabel('x', fontsize = 16)
+    plt.ylabel('ODE Residual', fontsize = 16)
+    plt.title(f'ODE Residual, l = {mode}, omega = {omega:.4f}')
+    plt.grid()
+    plt.legend()
+    plt.tight_layout()
+    plt.savefig(os.path.join(residual_dir_omega, f"Epoch_{epoch_number}.png"), format = 'png')
+    plt.close()
 
-        plt.figure(figsize = [7, 5])
-        plt.plot(diagnostic['x'], diagnostic['flux'], label = r'$J(x)$')
-        plt.axhline(0.0, linestyle = '--', label = 'Target')
-        plt.xlabel('x', fontsize = 16)
-        plt.ylabel('Flux Residual', fontsize = 16)
-        plt.title(f'Flux Residual, l = {mode}, omega = {omega_diag:.4f}')
-        plt.grid()
-        plt.legend()
-        plt.tight_layout()
-        plt.savefig(os.path.join(flux_dir_omega, f"Epoch_{epoch}.png"), format = 'png')
-        plt.close()
+    plt.figure(figsize = [7, 5])
+    plt.plot(diagnostic['x'], diagnostic['flux'], label = r'$J(x)$')
+    plt.axhline(0.0, linestyle = '--', label = 'Target')
+    plt.xlabel('x', fontsize = 16)
+    plt.ylabel('Flux Residual', fontsize = 16)
+    plt.title(f'Flux Residual, l = {mode}, omega = {omega:.4f}')
+    plt.grid()
+    plt.legend()
+    plt.tight_layout()
+    plt.savefig(os.path.join(flux_dir_omega, f"Epoch_{epoch_number}.png"), format = 'png')
+    plt.close()
+
+    flux_rms = np.sqrt(np.mean(diagnostic['flux']**2))
+    flux_max = np.max(np.abs(diagnostic['flux']))
+    ode_rms = np.sqrt(np.mean(diagnostic['res_im']**2 + diagnostic['res_re']**2))
+
+    print(f"Diagnostic omega= {omega:.4f} | Flux RMS = {flux_rms:.4e} | Max |Flux| = {flux_max:.4e} | ODE RMS = {ode_rms:.4e}", flush = True)
+
+    wavefunction_dir = os.path.join(diagnostic_dir_omega, "Wavefunction")
+    pq_dir = os.path.join(diagnostic_dir_omega, "PQ")
+
+    os.makedirs(wavefunction_dir, exist_ok = True)
+    os.makedirs(pq_dir, exist_ok = True)
+
+    x_values, u_re, u_im, P_re, P_im, Q_re, Q_im = query_wavefunction(model, mass, mode, omega, x_diagnostic)
+
+    plt.figure(figsize = [7,5])
+    plt.plot(x_values, u_re, label = 'Re(u)')
+    plt.plot(x_values, u_im, label = 'Im(u)')
+    plt.xlabel(r'$x$', fontsize = 16)
+    plt.ylabel(r"$u(x, \omega)$", fontsize = 16)
+    plt.title(f"Wavefunction, l = {mode}, omega = {omega:.4f}"
+            "\n"
+            f"Epoch: {epoch_number + 1}")
+    plt.grid()
+    plt.legend()
+    plt.tight_layout()
+    plt.savefig(os.path.join(wavefunction_dir, f"Epoch_{epoch_number}.png"), format = 'png')
+    plt.close()
+
+    plt.figure(figsize = [7, 5])
+    plt.plot(x_values, P_re, label = 'Re(P)')
+    plt.plot(x_values, P_im, label = 'Im(P)')
+    plt.plot(x_values, Q_re, label = 'Re(Q)')
+    plt.plot(x_values, Q_im, label = 'Im(Q)')
+    plt.xlabel('x', fontsize = 16)
+    plt.ylabel('P & Q', fontsize = 16)
+    plt.title(f"P & Q, l = {mode}, omega = {omega:.4f}"
+            "\n"
+            f"Epoch: {epoch_number + 1}")
+    plt.grid()
+    plt.legend()
+    plt.tight_layout()
+    plt.savefig(os.path.join(pq_dir, f"Epoch_{epoch_number}.png"), format = 'png')
+    plt.close()
+
+def load_numerical_gbf(csv_path):
+    if not os.path.exists(csv_path):
+        raise FileNotFoundError(f"Numerical GBF CSV not found: {csv_path}")
+
+    numerical_results = {}
+
+    with open(csv_path, 'r', newline =  '') as f:
+        reader = csv.DictReader(f)
+
+        if 'omega' not in reader.fieldnames or 'GBF' not in reader.fieldnames:
+            raise ValueError(f"Numerical CSV must contain 'omega' or 'GBF'. Found: {reader.fieldnames}")
+
+        for row in reader:
+            omega = float(row['omega'])
+            gbf = float(row['GBF'])
+
+            numerical_results[round(omega, 8)] = gbf
+
+    return numerical_results
+
+def compare_pinn_to_numerical(pinn_results, numerical_results, output_csv):
+
+    comparison_omegas = []
+    pinn_gbfs = []
+    numerical_gbfs = []
+    absolute_differences = []
+    relative_differences = []
+
+    for result in pinn_results:
+
+        omega = float(result['omega'])
+        key = round(omega, 8)
+
+        if key not in numerical_results:
+            raise ValueError(f"No numerical result found for omega = {omega:.10f}")
+
+        pinn_gbf = float(result['gbf'])
+        numerical_gbf  = float(numerical_results[key])
+
+        abs_diff = abs(pinn_gbf - numerical_gbf)
+
+        if numerical_gbf != 0.0:
+            rel_diff = abs_diff/abs(numerical_gbf)
+        else:
+            rel_diff = np.nan
+
+        comparison_omegas.append(omega)
+        pinn_gbfs.append(pinn_gbf)
+        numerical_gbfs.append(numerical_gbf)
+        absolute_differences.append(abs_diff)
+        relative_differences.append(rel_diff)
+
+    with open(output_csv, 'w', newline = '') as f:
+        writer = csv.writer(f)
+
+        writer.writerow(['omega', 'PINN_GBF', 'Numerical_GBF', 'Absolute_Difference', 'Relative_Difference'])
+
+        for values in zip(comparison_omegas, pinn_gbfs, numerical_gbfs, absolute_differences, relative_differences):
+            writer.writerow([f'{values[0]:.10f}', f'{values[1]:.12e}', f'{values[2]:.12e}', f'{values[3]:.12e}', f'{values[4]:.12e}' if np.isfinite(values[4]) else 'nan'])
+
+    return np.asarray(comparison_omegas), np.asarray(pinn_gbfs), np.asarray(numerical_gbfs), np.asarray(absolute_differences), np.array(relative_differences)
+
+def serialise_query_results(results):
+    return [{'omega': float(result['omega']), 'alpha_re': float(result['alpha'].real), 'alpha_im': float(result['alpha'].imag), 'beta_re': float(result['beta'].real),
+            'beta_im': float(result['beta'].imag), 'probability': float(result['probability']), 'gbf': float(result['gbf'])} for result in results]
+
+def save_comparison_plots(omegas, pinn_gbfs, numerical_gbfs, absolute_differences, relative_differences, title_suffix, prefix):
+
+    plt.figure(figsize=[14, 6])
+
+    plt.subplot(1, 2, 1)
+    plt.plot(omegas, numerical_gbfs, 'o-', label='Numerical')
+    plt.plot(omegas, pinn_gbfs, 'x-', label='Conditional PINN')
+    plt.xlabel(r'$\omega$', fontsize=16)
+    plt.ylabel(r'$\Gamma(\omega)$', fontsize=16)
+    plt.title(f'GBF Comparison — {title_suffix}')
+    plt.grid()
+    plt.legend()
+
+    plt.subplot(1, 2, 2)
+    plt.plot(omegas, numerical_gbfs, 'o-', label='Numerical')
+    plt.plot(omegas, pinn_gbfs, 'x-', label='Conditional PINN')
+    plt.xlabel(r'$\omega$', fontsize=16)
+    plt.ylabel(r'$\Gamma(\omega)$', fontsize=16)
+    plt.yscale('log')
+    plt.title(f'GBF Comparison — {title_suffix}')
+    plt.grid()
+    plt.legend()    
+
+    plt.tight_layout()
+    plt.savefig(os.path.join(comparisons_dir, f'{prefix}_GBF.png'), format='png')
+    plt.close()
+
+    plt.figure(figsize=[14, 6])
+
+    plt.subplot(1, 2, 1)
+    plt.plot(omegas, absolute_differences, 'o-')
+    plt.xlabel(r'$\omega$', fontsize=16)
+    plt.ylabel('Absolute Difference', fontsize=16)
+    plt.title(f'Absolute Difference — {title_suffix}')
+    plt.yscale('log')
+    plt.grid()
+
+    plt.subplot(1, 2, 2)
+    plt.plot(omegas, relative_differences, 'o-')
+    plt.xlabel(r'$\omega$', fontsize=16)
+    plt.ylabel('Relative Difference', fontsize=16)
+    plt.title(f'Relative Difference — {title_suffix}')
+    plt.yscale('log')
+    plt.grid()
+
+    plt.tight_layout()
+    plt.savefig(os.path.join(comparisons_dir, f'{prefix}_Differences.png'), format='png')
+    plt.close()
 
 #Setup PINN logistics
 #Seed included for reproducibility
 t.manual_seed(0)
 model = Model(2, 4, 32, num_hidden_layers = 3).to(device = device, dtype = DTYPE)
-
-# resume_path = os.path.join(f"./GBFWSRARData/l{mode}", "latest_warm_start_checkpoint.pth")
-# start_step = 0
-
-# if args.resume and not os.path.exists(resume_path):
-#     print("No previously trained model found. Initialising standard training...")
-#     print("-"*60)
-
-# if args.resume and os.path.exists(resume_path):
-#     print("Previous model exists...")
-#     print(f"Loading warm start checkpoint {resume_path}", flush = True)
-#     print('-'*60)
-
-#     checkpoint = t.load(resume_path, map_location = device, weights_only = False)
-
-#     if checkpoint['mode'] != mode:
-#         raise ValueError(f"Checkpoint is for l = {checkpoint['mode']}, current run requested l={mode}.")
-
-#     if checkpoint.get('checkpoint_type') != 'completed_frequency':
-#         raise ValueError("Resume checkpoint is not marked as a completed frequency checkpoint.")
-
-#     if not checkpoint.get('training_complete', False):
-#         raise ValueError("Resume checkpoint is not marked as fully trained.")
-
-#     if not np.isclose(checkpoint['mass'], mass):
-#         raise ValueError("Checkpoint mass does not match current run.")
-
-#     if not np.isclose(checkpoint['x_max'], x_max):
-#         raise ValueError("Checkpoint x_max does not match current run.")
-
-#     if checkpoint['model_architecture']['in_channels'] != 2:
-#         raise ValueError("Checkpoint was trained with a one-input model- current training is using a two-input model.")
-
-#     model.load_state_dict(checkpoint['model_state_dict'])
-#     loaded_GBF_global = checkpoint.get("GBF_global", {})
-
-#     if isinstance(loaded_GBF_global, dict):
-#         GBF_global = loaded_GBF_global
-
-#     else:
-#         old_schedule = checkpoint.get("omega_schedule", [])
-
-#         if len(old_schedule) != len(loaded_GBF_global):
-#             raise ValueError("Old checkpoint contains list-based GBF_global but its omega_schedule is incompatible.")
-
-#         GBF_global = {round(float(omega), 4): float(gbf) for omega, gbf in zip(old_schedule, loaded_GBF_global)}
-
-#     completed_omegas = set(GBF_global.keys())
-
-#     remaining_steps = [i for i, omega in enumerate(omega_schedule) if round(float(omega), 4) not in completed_omegas]
-
-#     if len(remaining_steps) == 0:
-#         start_step = len(omega_schedule)
-#         print("No frequencies remaining in the schedule.")
-#     else:
-#         start_step = remaining_steps[0]
-#         print(f"Next omega = {omega_schedule[start_step]:.4f}")
-
-#     print(f"Resuming from  omega = {checkpoint['omega']:.4f}", flush = True)
-
-#     # if start_step < len(omega_schedule):
-#     #     print(f"Next omega = {omega_schedule[start_step]:.4f}")
-
-# for step_idx in range(start_step, len(omega_schedule)):
-#     omega = float(omega_schedule[step_idx])
-#     is_first_frequency_of_run = (step_idx == start_step)
     
-    #Make various directories for saving results
+#Make various directories for saving results
 base_path = f'./GBFWXData/l{mode}'
 checkpoint_dir = os.path.join(base_path, 'checkpoints')
 diagnostic_dir = os.path.join(base_path, 'diagnostics')
@@ -626,6 +718,7 @@ lbfgs_iterations = 1000
 # print("-"*60)
 
 hist_epochs, hist_total, hist_flux, hist_ode, hist_ode_re, hist_ode_im, hist_weight = [], [], [], [], [], [], []
+diagnostic_model_states = []
 GBF, probability, alphas, betas, extraction_epochs = [], [], [], [], []
 N_points = 10000
 
@@ -684,7 +777,7 @@ for epoch in range(adam_iterations):
             if (epoch + 1) % 500 == 0 or epoch == 0:
                 print(f"""l = {mode} | Adam Epoch: {epoch + 1} / {adam_iterations}. 
                         Batch omegas = {batch_omegas},
-                        Monitor omega = {monitor_omega:.4f},
+                        Diagnostic omegas = {[f"{om:.4f}" for om in diagnostic_omegas]},
                         Total scaled loss: {loss.item():.4e}, 
                         Flux loss: {loss_f.item():.4e},
                         ODE loss: {loss_o.item():.4e},
@@ -693,102 +786,12 @@ for epoch in range(adam_iterations):
                 print("-"*60, flush = True)
 
     if (epoch + 1) % 1000 == 0:
-        print(f"Printing and plotting diagnostics...")
         print("-"*60)
+
+        diagnostic_model_states.append({'iteration': epoch + 1, 'stage': 'Adam', 'state_dict': {key: value.detach().cpu().clone() for key, value in model.state_dict().items()}})
+
         for omega_diag in diagnostic_omegas:
-            diagnostic_dir_omega = os.path.join(diagnostic_dir, f'w{omega_diag:.4f}')
-            os.makedirs(diagnostic_dir_omega, exist_ok = True)
-
-            diagnostic = evaluate_fixed_frequency(model, mass, mode, omega_diag, x_diagnostic)
-
-            flux_dir_omega = os.path.join(diagnostic_dir_omega, 'Flux')
-            residual_dir_omega = os.path.join(diagnostic_dir_omega, 'Residuals')
-            os.makedirs(flux_dir_omega, exist_ok = True)
-            os.makedirs(residual_dir_omega, exist_ok = True)
-
-            plt.figure([7, 5])
-            plt.plot(hist_total, label = 'Total')
-            plt.plot(hist_ode, label = 'ODE')
-            plt.plot(hist_flux, label = 'Flux')
-            plt.plot(hist_ode_re, label = 'Real ODE')
-            plt.plot(hist_ode_im, label = 'Imag ODE')
-            plt.yscale('log')
-            plt.xlabel('Epoch', fontsize = 16)
-            plt.ylabel('Loss', fontsize = 16)
-            plt.title(f'Two-input PINN Loss, l = {mode}', fontsize = 16)
-            plt.grid()
-            plt.legend()
-            plt.tight_layout()
-            plt.savefig(os.path.join(diagnostic_dir, "latest_loss.png"), format = 'png')
-
-            plt.figure(figsize = [7, 5])
-            plt.plot(diagnostic['x'], diagnostic['res_re'], label = r"$\Re(R_{ODE})$")
-            plt.plot(diagnostic['x'], diagnostic['res_im'], label = r"$\Im(R_{ODE})$")
-            plt.axhline(0.0, linestyle = '--', label = 'Target')
-            plt.xlabel(r'$x$', fontsize = 16)
-            plt.ylabel('ODE Residual', fontsize = 16)
-            plt.title(f'ODE Residual, l = {mode}, omega = {omega_diag:.4f}')
-            plt.grid()
-            plt.legend()
-            plt.tight_layout()
-            plt.savefig(f'{residual_dir_omega}/Epoch{epoch + 1}.png', format = 'png')
-            plt.close()
-
-            plt.figure(figsize = [7, 5])
-            plt.plot(diagnostic['x'], diagnostic['flux'], label = r"$J(x)$")
-            plt.axhline(0.0, linestyle = '--', label = 'Target')
-            plt.xlabel(r'$x$', fontsize = 16)
-            plt.ylabel('Flux Residual', fontsize = 16)
-            plt.title(f'Flux Conservation, l = {mode}, omega = {omega_diag:.4f}')
-            plt.grid()
-            plt.legend()
-            plt.tight_layout()
-            plt.savefig(f'{flux_dir_omega}/Epoch{epoch + 1}.png', format = 'png')
-            plt.close()
-
-            flux_rms = np.sqrt(np.mean(diagnostic['flux']**2))
-            flux_max = np.max(np.abs(diagnostic['flux']))
-            ode_rms = np.sqrt(np.mean(diagnostic['res_re']**2 + diagnostic['res_im']**2))
-            
-            print(f"Diagnostic omega = {omega_diag:.4f} |"
-                    f" Flux RMS = {flux_rms:.4e} |"
-                    f" Max |Flux| = {flux_max:.4e} |"
-                    f" ODE RMS = {ode_rms:.4e}", flush = True)
-
-            x_values, u_re, u_im, P_re, P_im, Q_re, Q_im = query_wavefunction(model, mass, mode, monitor_omega, x_diagnostic)
-
-            wavefunction_dir = os.path.join(diagnostic_dir_omega, 'Wavefunction')
-            os.makedirs(wavefunction_dir, exist_ok = True)
-
-            plt.figure(figsize = [7, 5])
-            plt.plot(x_values, u_re, label = "Re(u)")
-            plt.plot(x_values, u_im, label = "Im(u)")
-            plt.xlabel(r"$x$", fontsize = 16)
-            plt.ylabel(r"$u(x, \omega)$", fontsize = 16)
-            plt.title(f"Wavefunction: l = {mode}, omega = {monitor_omega:.4f}, Epoch = {epoch + 1}", fontsize = 16)
-            plt.grid()
-            plt.legend()
-            plt.tight_layout()
-            plt.savefig(f"{wavefunction_dir}/Epoch_{epoch + 1}.png", format = 'png')
-            plt.close()
-
-            pq_dir = os.path.join(diagnostic_dir_omega, 'PQ')
-            os.makedirs(pq_dir)
-
-            plt.figure(figsize = [7, 5])
-            plt.plot(x_values, P_re, label = 'Re(P)')
-            plt.plot(x_values, P_im, label = 'Im(P)')
-            plt.plot(x_values, Q_re, label = 'Re(Q)')
-            plt.plot(x_values, Q_im, label = 'Im(Q)')
-            plt.xlabel('x')
-            plt.ylabel('P & Q')
-            plt.title(f'P & Q, l = {mode}, omega = {monitor_omega:.4f}')
-            plt.grid()
-            plt.legend()
-            plt.tight_layout()
-            plt.savefig(f'{pq_dir}/PQ_Epoch_{epoch + 1}.png', format = 'png')
-            plt.close()
-
+            save_training_diagnostics(model, epoch_number = epoch + 1, omega = omega_diag)
         print("-"*60)
 
 #Residual-based adapative refinement using the complex ODE residual
@@ -844,7 +847,6 @@ lbfgs_success = True
 
 for epoch in range(lbfgs_iterations):
     info = {'total': 0, 'flux': 0, 'ode': 0, 'loss_re': 0, 'loss_im': 0, 'res_re': 0, 'res_im': 0}
-    plot_data = {}
 
     def closure():
         lbfgs_optimiser.zero_grad(set_to_none = True)
@@ -854,17 +856,6 @@ for epoch in range(lbfgs_iterations):
 
         info.update({'total': loss.item(), 'flux': loss_f.item(), 'ode': loss_o.item(), 'loss_re': loss_ode_re.item(), 'loss_im': loss_ode_im.item()})
 
-        # plot_data['x'] = x_tensor_lbfgs.cpu().detach().numpy()
-        # plot_data['re_u'] = Re_u_nn.cpu().detach().numpy()
-        # plot_data['im_u'] = Im_u_nn.cpu().detach().numpy()
-        # plot_data['flux'] = flux_res.cpu().detach().numpy()
-        # plot_data['res_re'] = res_ode_re.cpu().detach().numpy()
-        # plot_data['res_im'] = res_ode_im.cpu().detach().numpy()
-        # plot_data['P_re'] = P_re.cpu().detach().numpy()
-        # plot_data['P_im'] = P_im.cpu().detach().numpy()
-        # plot_data['Q_re'] = Q_re.cpu().detach().numpy()
-        # plot_data['Q_im'] = Q_im.cpu().detach().numpy()
-
         return loss
 
     lbfgs_optimiser.step(closure)
@@ -873,77 +864,47 @@ for epoch in range(lbfgs_iterations):
     _, _, _, loss_now, lf_now, lo_now, lre, lim, *_ = with_grad
     info.update({'total': loss_now.item(), 'flux': lf_now.item(), 'ode': lo_now.item(), 'loss_re': lre.item(), 'loss_im': lim.item()})
 
+    global_epoch = adam_iterations + epoch
+    
+    hist_epochs.append(global_epoch + 1)
+    hist_total.append(loss_now.item())
+    hist_flux.append(lf_now.item())
+    hist_ode.append(lo_now.item())
+    hist_ode_re.append(lre.item())
+    hist_ode_im.append(lim.item())
+    hist_weight.append(flux_weight)
+
+    with open(loss_history_dir, 'a', newline = '') as f:
+        writer = csv.writer(f)
+        writer.writerow([(global_epoch + 1), 'L-BFGS', loss_now.item(), lf_now.item(), lo_now.item(), lre.item(), lim.item(), flux_weight])
+
     if not np.isfinite(info['total']):
         print(f"L-BFGS diverged at epoch {epoch}; stopping.", flush=True)
         lbfgs_success = False
         break
 
     if (epoch + 1) % 40 == 0 or epoch == (lbfgs_iterations - 1):
-            #Printing and plotting
-            extraction_epochs.append(epoch + adam_iterations)
-            alpha, beta, prob, gbf = extraction(model, x_max, mass, mode, monitor_omega)
-            alphas.append(alpha)
-            betas.append(beta)
-            probability.append(prob)
-            GBF.append(gbf)
-            
-            print(f"""l = {mode} | L-BFGS Epoch: {epoch + 1} / {lbfgs_iterations}. 
-                        L-BFGS omegas = {lbfgs_omegas},
-                        Monitor omega = {monitor_omega:.4f},
-                        Total scaled loss: {info['total']:.4e}, 
-                        Flux loss: {info['flux']:.4e},
-                        ODE loss: {info['ode']:.4e},
-                        Monitor GBF: {gbf},
-                        Monitor |alpha|^2 - |beta|^2: {prob}.""", flush = True)
-            print("-"*60, flush = True)
+        #Printing and plotting
+        extraction_epochs.append(epoch + adam_iterations)
+        alpha, beta, prob, gbf = extraction(model, x_max, mass, mode, monitor_omega)
+        alphas.append(alpha)
+        betas.append(beta)
+        probability.append(prob)
+        GBF.append(gbf)
         
-            # x_plot = sample_x_points(N_points, x_max, dtype = DTYPE, device = device)
-            # x_plot = x_plot.cpu().detach().numpy()
-            # omega_plot = t.full_like(x_plot, plot_omega)
-            # idx = np.argsort(x_plot)
-    
-            # plt.figure()
-            # plt.plot(x_plot[idx], plot_data['res_re'].flatten()[idx], color = 'blue', label = r'$\Re (Res_{ODE})$')
-            # plt.plot(x_plot[idx], plot_data['res_im'].flatten()[idx], color = 'green', label = r'$\Im (Res_{ODE})$')
-            # plt.plot(x_plot[idx], plot_data['re_u'].flatten()[idx], color = 'orange', label = r'$\Re (u_{NN})$')
-            # plt.plot(x_plot[idx], plot_data['im_u'].flatten()[idx], color = 'red', label = r'$\Im (u_{NN})$')
-            # plt.xlabel('x', fontsize = 25)
-            # plt.ylabel('Output', fontsize = 25)
-            # plt.title(f"l = {mode}, omega = {omega:.4f}", fontsize = 20)
-            # plt.grid()
-            # plt.legend(fontsize = 25, loc = 'best')
-            # plt.tight_layout()
-            # plt.savefig(f'{out_dir}/Output_Epoch_{epoch + 1 + adam_iterations}.png', format = 'png')
-            # plt.close()
-        
-            plt.figure([7, 5])
-            plt.plot(hist_total, label = 'Total')
-            plt.plot(hist_ode, label = 'ODE')
-            plt.plot(hist_flux, label = 'Flux')
-            plt.plot(hist_ode_re, label = 'Real ODE')
-            plt.plot(hist_ode_im, label = 'Imag ODE')
-            plt.yscale('log')
-            plt.xlabel('Epoch', fontsize = 16)
-            plt.ylabel('Loss', fontsize = 16)
-            plt.title(f'Two-input PINN Loss, l = {mode}', fontsize = 16)
-            plt.grid()
-            plt.legend()
-            plt.tight_layout() #For Mr ChatGPT, I don't think the loss histories are updated in the L-BFGS loop so this might not work as required.
-            #I want the same diagnostic plotting that happens in the Adam training to occur for the L-BFGS training, thank you
-            plt.savefig(os.path.join(diagnostic_dir, "latest_loss.png"), format = 'png')
-    
-            # plt.figure()
-            # plt.plot(x_plot[idx], plot_data['flux'].flatten()[idx], color = 'purple', label = 'Flux Residual')
-            # plt.axhline(0.0, color = 'cyan', linestyle = '--', label = 'Target')
-            # plt.xlabel('x', fontsize = 25)
-            # plt.ylabel(r'Flux Residual', fontsize = 25)
-            # plt.title(f"l = {mode}, omega = {omega:.4f}", fontsize = 20)
-            # # plt.yscale('symlog')
-            # plt.grid()
-            # plt.legend(fontsize = 15, loc = 'best')
-            # plt.tight_layout()
-            # plt.savefig(f'{flux_dir}/Flux_Residual_Epoch_{epoch + 1 + adam_iterations}.png', format = 'png')
-            # plt.close()
+        print(f"""l = {mode} | L-BFGS Epoch: {epoch + 1} / {lbfgs_iterations}. 
+                    L-BFGS omegas = {lbfgs_omegas},
+                    Diagnostic omegas = {[f"{om:.4f}" for om in diagnostic_omegas]},
+                    Total scaled loss: {info['total']:.4e}, 
+                    Flux loss: {info['flux']:.4e},
+                    ODE loss: {info['ode']:.4e},
+                    Monitor GBF: {gbf},
+                    Monitor |alpha|^2 - |beta|^2: {prob}.""", flush = True)
+        print("-"*60, flush = True)
+
+        diagnostic_model_states.append({'iteration': global_epoch + 1, 'stage': 'L-BFGS', 'state_dict': {key: value.detach().cpu().clone() for key, value in model.state_dict().items()}})
+        for omega_diag in diagnostic_omegas:
+            save_training_diagnostics(model, epoch_number = global_epoch + 1, omega = omega_diag)
 
 print("Conditional PINN training complete.", flush = True)
 
@@ -967,7 +928,7 @@ for result in training_query_results:
     key = round(result['omega'], 4)
     GBF_global[key] = result['gbf']
 
-omega_query = np.linspace(omega_min, omega_max, 200)
+omega_query = np.linspace(omega_min, omega_max, args.query_steps)
 dense_query_results = query_gbf(model, mass, mode, omega_query, x_max)
 dense_query_omegas = np.array([result['omega'] for result in dense_query_results])
 dense_query_gbfs = np.array([result['gbf'] for result in dense_query_results])
@@ -994,336 +955,218 @@ plt.tight_layout()
 plt.savefig(f"./GBFWXData/l{mode}/WXPINN_GBF.png", format = 'png')
 plt.close()
 
-omega_plot = monitor_omega
-x_values, u_re, u_im, P_re, P_im, Q_re, Q_im = query_wavefunction(model, omega_plot, mass, mode, x_diagnostic)
-idx = np.argsort(x_values)
-x_plot = x_values[idx]
-
-# if not lbfgs_success:
-#     print(f"L-BFGS failed for l = {mode}, omega = {omega:.4f}. Frequency will not be marked as complete.", flush = True)
-#     continue
-
-print(f"Training complete for l = {mode}, omega = {omega:.4f}. Plotting results...)")
+print("Preparing final post-training diagnostics...")
 print("="*60)
 
-r_plot = 2*mass/(1 - x_plot)
-# #Final plots after training
-plt.figure(figsize = [14, 6])
-plt.subplot(1, 2, 1)
-plt.suptitle("Direct Neural Network Output"
-    "\n"
-    f"l = {mode}, omega = {omega:.4f}")
-plt.plot(x_plot, P_re[idx], label = 'Re(P)')
-plt.plot(x_plot, P_im[idx], label = 'Im(P)')
-plt.plot(x_plot, Q_re[idx], label = 'Re(Q)')
-plt.plot(x_plot, Q_im[idx], label = 'Im(Q)')
-plt.xlabel('x', fontsize = 20)
-plt.ylabel('P and Q', fontsize = 20)
-plt.legend()
+for omega_plot in diagnostic_omegas:
+
+    final_plot_omega_dir = os.path.join(final_plots_dir, f"omega{omega_plot:.4f}")
+    os.makedirs(final_plot_omega_dir, exist_ok = True)
+
+    x_values, u_re, u_im, P_re, P_im, Q_re, Q_im = query_wavefunction(model, mass, mode,  omega_plot, x_diagnostic)
+
+    x_plot = x_values
+    r_plot = 2*mass/(1 - x_plot)
+
+    plt.figure(figsize=[14, 6])
+
+    plt.subplot(1, 2, 1)
+    plt.suptitle("Direct Neural Network Output\n"
+                f"l = {mode}, omega = {omega_plot:.4f}")
+    plt.plot(x_plot, P_re, label='Re(P)')
+    plt.plot(x_plot, P_im, label='Im(P)')
+    plt.plot(x_plot, Q_re, label='Re(Q)')
+    plt.plot(x_plot, Q_im, label='Im(Q)')
+    plt.xlabel('x', fontsize = 16)
+    plt.ylabel('P and Q', fontsize = 16)
+    plt.legend()
+    plt.grid()
+
+    plt.subplot(1, 2, 2)
+    plt.plot(r_plot, P_re, label='Re(P)')
+    plt.plot(r_plot, P_im, label='Im(P)')
+    plt.plot(r_plot, Q_re, label='Re(Q)')
+    plt.plot(r_plot, Q_im, label='Im(Q)')
+    plt.xlabel('r', fontsize = 16)
+    plt.ylabel('P and Q', fontsize = 16)
+    plt.legend()
+    plt.grid()
+
+    plt.tight_layout()
+    plt.savefig(os.path.join(final_plot_omega_dir, 'PQ.png'), format='png')
+    plt.close()
+
+    plt.figure(figsize=[14, 6])
+
+    plt.subplot(1, 2, 1)
+    plt.suptitle("Wave function u built via ansatz of P and Q\n"
+        f"l = {mode}, omega = {omega_plot:.4f}")
+    plt.plot(x_plot, u_re, label=r'$\Re(u_{NN})$')
+    plt.plot(x_plot, u_im, label=r'$\Im(u_{NN})$')
+    plt.xlabel('x', fontsize = 16)
+    plt.ylabel(r'$u(x)$', fontsize = 16)
+    plt.legend()
+    plt.grid()
+
+    plt.subplot(1, 2, 2)
+    plt.plot(r_plot, u_re, label=r'$\Re(u_{NN})$')
+    plt.plot(r_plot, u_im, label=r'$\Im(u_{NN})$')
+    plt.xlabel('r', fontsize = 16)
+    plt.ylabel('u(r)', fontsize = 16)
+    plt.legend()
+    plt.grid()
+
+    plt.tight_layout()
+    plt.savefig(os.path.join(final_plot_omega_dir, 'u.png'), format='png')
+    plt.close()
+
+numerical_csv_path = f'./Numerical/l{mode}/Output/numericalGBF.csv'
+
+print(f"Loading numerical GBF data from: {numerical_csv_path}")
+
+numerical_results = load_numerical_gbf(numerical_csv_path)
+
+print(f"Loaded {len(numerical_results)} numerical results.")
+
+training_comparison_csv = os.path.join(comparisons_dir, "PINN_vs_Numerical_training.csv")
+training_comparison_omegas, training_pinn_gbfs, training_numerical_gbfs, training_absolute_differences, training_relative_differences = compare_pinn_to_numerical(training_query_results,
+                    numerical_results, training_comparison_csv)
+save_comparison_plots(training_comparison_omegas, training_pinn_gbfs, training_numerical_gbfs, training_absolute_differences, training_relative_differences, 
+                    "Training Frequencies", "training")
+
+query_comparison_csv = os.path.join(comparisons_dir, "PINN_vs_Numerical_query.csv")
+query_comparison_omegas, query_pinn_gbfs, query_numerical_gbfs, query_absolute_differences, query_relative_differences = compare_pinn_to_numerical(dense_query_results,
+                    numerical_results, query_comparison_csv) 
+save_comparison_plots(query_comparison_omegas, query_pinn_gbfs, query_numerical_gbfs, query_absolute_differences, query_relative_differences, "Dense Query Frequencies", "query")
+
+plt.figure(figsize=[7, 5])
+
+plt.plot(training_comparison_omegas, training_numerical_gbfs, 'o-', label='Numerical')
+plt.plot(training_comparison_omegas, training_pinn_gbfs, 'x-', label='Two-input PINN')
+plt.xlabel(r'$\omega$', fontsize = 16)
+plt.ylabel(r'$\Gamma(\omega)$', fontsize = 16)
+plt.title(f'Grey-Body Factor, l = {mode}')
 plt.grid()
+plt.legend()
 plt.tight_layout()
 
-plt.subplot(1, 2, 2)
-plt.plot(r_plot, P_re[idx], label = 'Re(P)')
-plt.plot(r_plot, P_im[idx], label = 'Im(P)')
-plt.plot(r_plot, Q_re[idx], label = 'Re(Q)')
-plt.plot(r_plot, Q_im[idx], label = 'Im(Q)')
-plt.xlabel('r', fontsize = 20)
-plt.ylabel('P and Q', fontsize = 20)
-plt.legend()
-plt.grid()
-plt.tight_layout()
-
-plt.savefig(f'{final_plots_dir}/PQ.png', format = 'png')
+plt.savefig(os.path.join(comparisons_dir, 'Final_GBF_Comparison_training.png'), format='png')
 plt.close()
 
-plt.figure(figsize  = [14, 6])
-plt.subplot(1, 2, 1)
-plt.suptitle("Wave function u built via ansatz of P and Q"
-    "\n"
-    f"l = {mode}, omega = {omega_plot:.4f}")
-plt.plot(x_plot, u_re[idx], color = 'orange', label = r'$\Re (u_{NN})$')
-plt.plot(x_plot, u_im[idx], color = 'red', label = r'$\Im (u_{NN})$')
-plt.xlabel('x', fontsize = 20)
-plt.ylabel(r'$u(x)$', fontsize = 20)
-plt.legend()
+plt.figure(figsize=[7, 5])
+
+plt.plot(query_comparison_omegas, query_numerical_gbfs, 'o-', label='Numerical')
+plt.plot(query_comparison_omegas, query_pinn_gbfs, 'x-', label='Two-input PINN')
+plt.xlabel(r'$\omega$', fontsize = 16)
+plt.ylabel(r'$\Gamma(\omega)$', fontsize = 16)
+plt.title(f'Grey-Body Factor, l = {mode}')
 plt.grid()
+plt.legend()
 plt.tight_layout()
 
-plt.subplot(1, 2, 2)
-plt.plot(r_plot, u_re[idx], color = 'orange', label = r'$\Re (u_{NN})$')
-plt.plot(r_plot, u_im[idx], color = 'red', label = r'$\Im (u_{NN})$')
-plt.xlabel('r', fontsize = 20)
-plt.ylabel('u(r)', fontsize = 20)
-plt.legend()
-plt.grid()
-plt.tight_layout()
-
-plt.savefig(f'{final_plots_dir}/u.png', format = 'png')
+plt.savefig(os.path.join(comparisons_dir, 'Final_GBF_Comparison_query.png'), format='png')
 plt.close()
 
-# plt.figure(figsize = [14, 6])
-# plt.subplot(1, 2, 1)
-# plt.suptitle("ODE Residual"
-#     "\n"
-#     f"l = {mode}, omega = {omega:.4f}")
-# plt.plot(x_plot[idx], plot_data['res_re'].flatten()[idx], label = 'Re(res)')
-# plt.plot(x_plot[idx], plot_data['res_im'].flatten()[idx], label = 'Im(res)')
-# plt.xlabel('x', fontsize = 20)
-# plt.ylabel('Residual', fontsize = 20)
-# plt.legend()
-# plt.grid()
-# plt.tight_layout()
+omega_mid = omega_schedule[len(omega_schedule)//2]
+final_alpha, final_beta, final_prob, final_gbf = extraction(model, x_max, mass, mode, omega_mid)
 
-# plt.subplot(1, 2, 2)
-# plt.plot(r_plot[idx], plot_data['res_re'].flatten()[idx], label = 'Re(res)')
-# plt.plot(r_plot[idx], plot_data['res_im'].flatten()[idx], label = 'Im(res)')
-# plt.xlabel('r', fontsize = 20)
-# plt.ylabel('Residual', fontsize = 20)
-# plt.legend()
-# plt.grid()
-# plt.tight_layout()
+T = 1/final_alpha
+R = final_beta/final_alpha
 
-# plt.savefig(f'{final_plots_dir}/Residuals.png', format = 'png')
-# plt.close()
+final_loss_data = compute_loss(model, x_tensor_lbfgs, mass, mode, omega_tensor_lbfgs, flux_weight)
 
-# alphas = np.array(alphas)
-# alpha_real_array, alpha_imag_array = alphas.real, alphas.imag
-# betas = np.array(betas)
-# beta_real_array, beta_imag_array = betas.real, betas.imag
+_, _, _, final_total_loss, final_flux_loss, final_ode_loss, _, _, *_ = final_loss_data
 
-# plt.figure(figsize = [7, 7])
-# plt.plot(alphas.real, alphas.imag, 'r--', alpha = 0.9)
-# plt.scatter(alphas[0].real, alphas[0].imag, color='blue', label = f'Initial: {alphas[0].real:.3f} + {alphas[0].imag:.3f}i')
-# plt.scatter(alphas[-1].real, alphas[-1].imag, color='green', label = f'Final: {alphas[-1].real:.3f} + {alphas[-1].imag:.3f}i')
-# plt.xlabel(r'$\Re(\alpha)$', fontsize = 18)
-# plt.ylabel(r'$\Im(\alpha)$', fontsize = 18)
-# plt.title(f'l = {mode}, omega = {omega:.4f}', fontsize = 18)
-# plt.tight_layout()
-# plt.grid()
-# plt.legend()
-# plt.savefig(f'{final_plots_dir}/alpha_convergence.png', format = 'png')
-# plt.close()
+training_relative_finite = training_relative_differences[np.isfinite(training_relative_differences)]
+query_relative_finite = query_relative_differences[np.isfinite(query_relative_differences)]
 
-# plt.figure(figsize = [7, 7])
-# plt.plot(betas.real, betas.imag, 'g--', alpha = 0.9)
-# plt.scatter(betas[0].real, betas[0].imag, color='blue', label = f'Initial: {betas[0].real:.3f} + {betas[0].imag:.3f}i')
-# plt.scatter(betas[-1].real, betas[-1].imag, color='green', label = f'Final: {betas[-1].real:.3f} + {betas[-1].imag:.3f}i')
-# plt.xlabel(r'$\Re(\beta)$', fontsize = 18)
-# plt.ylabel(r'$\Im(\beta)$', fontsize = 18)
-# plt.title(f'l = {mode}, omega = {omega:.4f}', fontsize = 18)
-# plt.tight_layout()
-# plt.grid()
-# plt.legend()
-# plt.savefig(f'{final_plots_dir}/beta_convergence.png', format = 'png')
-# plt.close()
+result_file_path = os.path.join(results_dir, 'result.txt')
 
-# fig, ax1 = plt.subplots(figsize = [7, 4.5])
-
-# ax1.plot(extraction_epochs, GBF, color = 'blue', label = r'$\Gamma$')
-# ax1.scatter(extraction_epochs[-1], GBF[-1], marker = 'o', s = 30, color = 'lime', label = r"Final $\Gamma$")
-# ax1.set_yscale('log')
-# ax1.set_xlabel('Epoch', fontsize = 14)
-# ax1.set_ylabel(r'$\Gamma$', fontsize = 16)
-# ax1.tick_params(axis = 'y')
-# # ax1.axhline(7.0011982e-05, color = 'blue', linestyle = ':', linewidth = 1,
-# #             label = r'$\Gamma_{\rm ref}$')
-# ax1.grid(alpha = 0.3)
-
-# ax2 = ax1.twinx()
-# ax2.plot(extraction_epochs, probability, color = 'red', label = r'$|\alpha|^2 - |\beta|^2$')
-# ax2.scatter(extraction_epochs[-1], probability[-1], marker = 'o', s = 30, color = 'magenta', label = r'Final $|\alpha|^2 - |\beta|^2$')
-# ax2.set_ylabel(r'$|\alpha|^2 - |\beta|^2$', fontsize = 16)
-# ax2.tick_params(axis = 'y')
-# ax2.axhline(1.0, color = 'red', linestyle = ':', linewidth = 1, label = r'Target $|\alpha|^2 - |\beta|^2$')
-
-# lines1, labels1 = ax1.get_legend_handles_labels()
-# lines2, labels2 = ax2.get_legend_handles_labels()
-# ax1.legend(lines1 + lines2, labels1 + labels2, fontsize = 11, loc = 'best')
-# plt.title(f'l = {mode}, omega = {omega:.4f}', fontsize = 16)
-# plt.tight_layout()
-# plt.savefig(f'{final_plots_dir}/GBFProb.png', format = 'png')
-# plt.close()
-
-# print(f"Plots saved to {final_plots_dir}")
-# print("="*60)
-print("Saving results and trained model...")
-print("="*60)
-
-# final_alpha, final_beta, final_prob, final_gbf = extraction(model, x_max, mass, mode, omega)
-# GBF_global[round(omega, 4)] = final_gbf
-# T = 1/final_alpha
-# R = final_beta/final_alpha
-
-result_file_path = os.path.join(base_path, 'result.txt')
 with open(result_file_path, 'w') as f:
-    f.write(f"Warm-start RAR\n")
-    f.write(f"l = {int(mode)}\n")
-    f.write(f"omega = {omega:.4f}\n")
-    f.write(f"final ODE loss = {info['ode']:.4e}\n")
-    f.write(f"final flux loss = {info['flux']:.4e}\n")
-    f.write(f"alpha_re = {final_alpha.real:.10f}\n")
-    f.write(f"alpha_im = {final_alpha.imag:.10f}\n")
-    f.write(f"beta_re = {final_beta.real:.10f}\n")
-    f.write(f"beta_im = {final_beta.imag:.10f}\n")
-    f.write(f"T_re = {T.real:.10f}\n")
-    f.write(f"T_im = {T.imag:.10f}\n")
-    f.write(f"R_re = {R.real:.10f}\n")
-    f.write(f"R_im = {R.imag:.10f}\n")
-    f.write(f"Prob = {final_prob:.10f}\n")
-    f.write(f"GBF = {final_gbf:.10e}\n")
+    f.write("Two-input PINN\n")
+    f.write(f"mass = {mass}\n")
+    f.write(f"l = {mode}\n")
+    f.write(f"x_extract = {x_max}\n")
+
+    f.write(f"omega_min = {omega_min:.10f}\n")
+    f.write(f"omega_max = {omega_max:.10f}\n")
+    f.write(f"training_frequencies = {len(omega_schedule)}\n")
+    f.write(f"query_frequencies = {len(omega_query)}\n")
+    f.write("diagnostic_frequencies = " + ", ".join(f"{om:.10f}" for om in diagnostic_omegas) + "\n")
+
+    f.write(f"final_total_loss = {final_total_loss.item():.12e}\n")
+    f.write(f"final_ODE_loss = {final_ode_loss.item():.12e}\n")
+    f.write(f"final_flux_loss = {final_flux_loss.item():.12e}\n")
+
+    f.write(f"mid_frequency = {omega_mid:.10f}\n")
+    f.write(f"alpha_re = {final_alpha.real:.12e}\n")
+    f.write(f"alpha_im = {final_alpha.imag:.12e}\n")
+    f.write(f"beta_re = {final_beta.real:.12e}\n")
+    f.write(f"beta_im = {final_beta.imag:.12e}\n")
+
+    f.write(f"T_re = {T.real:.12e}\n")
+    f.write(f"T_im = {T.imag:.12e}\n")
+    f.write(f"R_re = {R.real:.12e}\n")
+    f.write(f"R_im = {R.imag:.12e}\n")
+
+    f.write(f"mid_frequency_prob = {final_prob:.12e}\n")
+    f.write(f"monitor_frequency_GBF = {final_gbf:.12e}\n")
+
+    f.write(f"training_mean_relative_error = {np.mean(training_relative_finite):.12e}\n")
+    f.write(f"training_max_relative_error = {np.max(training_relative_finite):.12e}\n")
+    f.write(f"query_mean_relative_error = {np.mean(query_relative_finite):.12e}\n")
+    f.write(f"query_max_relative_error = {np.max(query_relative_finite):.12e}\n")
+
+    f.write(f"lbfgs_success = {lbfgs_success}\n")
 
 checkpoint = {'model_state_dict': model.state_dict(),
-        'model_architecture': {'in_channels': 2, 'out_channels': 4, 'hidden_channels': 32,  'hidden_layers': 3},
-        'omega_input_scaling': {'omega_min': omega_min, 'omega_max': omega_max},
-        'rar_config': {'interval': RAR_INTERVAL,
-                'candidates': RAR_CANDIDATES,
-                'add_per_refinement': RAR_ADD,
-                'max_points': RAR_MAX},
-        'mass': mass,
-        'mode': mode,
-        'x_max': x_max,
-        'omega_schedule': omega_schedule.tolist(),
-        'dtype': str(DTYPE),
-        'adam_iterations': adam_iterations,
-        'lbfgs_iterations': lbfgs_iterations,
-        'flux_weight_initial': 10.0,
-        'flux_weight_final': 1.0,
-        'final_monitor_omega': monitor_omega,
-        'training_complete': True}
-    
-checkpoint_path = os.path.join(base_path, f'pinn_checkpoint_GBFWX_l{mode}.pth')
+            'model_architecture': {'in_channels': 2, 'out_channels': 4, 'hidden_channels': 32, 'hidden_layers': 3},
+            'activation_config': {'type': 'keerie_adaptive_tanh', 'n': 10.0},
+            'omega_input_scaling': {'omega_min': omega_min, 'omega_max': omega_max},
+            'rar_config': {'interval': RAR_INTERVAL, 'candidates': RAR_CANDIDATES, 'add_per_refinement': RAR_ADD, 'max_points': RAR_MAX},
+            'ansatz_config': {'x_power': 3, 'x_safe_min': 1e-12, 'x_safe_max': 1 - 1e-3},
+            'mass': mass,
+            'mode': mode,
+            'x_max': x_max,
+
+            'omega_schedule': omega_schedule.tolist(),
+            'query_steps': args.query_steps,
+            'diagnostic_omegas': diagnostic_omegas,
+            'x_diagnostic': x_diagnostic.tolist(),
+
+            'adam_iterations': adam_iterations,
+            'lbfgs_iterations': lbfgs_iterations,
+
+            'flux_weight_initial': 10.0,
+            'flux_weight_final': 1.0,
+
+            'rar_points_by_omega': {key: value.detach().cpu() for key, value in rar_points_by_omega.items()},
+
+            'training_history': {'epochs': [int(value) for value in hist_epochs], 'total_loss': [float(value) for value in hist_total], 'flux_loss': [float(value) for value in hist_flux],
+                        'ode_loss': [float(value) for value in hist_ode], 'ode_real_loss': [float(value) for value in hist_ode_re], 'ode_imag_loss': [float(value) for value in hist_ode_im],
+                        'flux_weight': [float(value) for value in hist_weight]},
+
+            'extraction_history': {'epochs': [int(value) for value in extraction_epochs], 'alpha_re': [float(value.real) for value in alphas], 'alpha_im': [float(value.imag) for value in alphas],
+                                    'beta_re': [float(value.real) for value in betas], 'beta_im': [float(value.imag) for value in betas], 'probability': [float(value) for value in probability],
+                                    'gbf': [float(value) for value in GBF]},
+
+            'training_query_results': serialise_query_results(training_query_results),
+            'dense_query_results': serialise_query_results(dense_query_results),
+
+            'numerical_results': [{'omega': float(omega), 'gbf': float(gbf)} for omega, gbf in sorted(numerical_results.items())],
+
+            'training_comparison': {'omega': training_comparison_omegas.tolist(), 'pinn_gbf': training_pinn_gbfs.tolist(), 'numerical_gbf': training_numerical_gbfs.tolist(),
+                                'absolute_difference': training_absolute_differences.tolist(), 'relative_difference': training_relative_differences.tolist()},
+
+            'query_comparison': {'omega': query_comparison_omegas.tolist(), 'pinn_gbf': query_pinn_gbfs.tolist(), 'numerical_gbf': query_numerical_gbfs.tolist(),
+                                'absolute_difference': query_absolute_differences.tolist(), 'relative_difference': query_relative_differences.tolist()},
+
+            'diagnostic_model_states': diagnostic_model_states,
+
+            'training_complete': True}
+
+checkpoint_path = os.path.join(checkpoint_dir, f'pinn_conditional_GBFWX_l{mode}.pth')
+
 t.save(checkpoint, checkpoint_path)
 
-#Save and update the most recent warm-start checkpoint
-resume_path = os.path.join(f'./GBFWSRARData/l{mode}', 'latest_warm_start_checkpoint.pth')
-t.save(checkpoint, resume_path)
-print(f"Checkpoint saved to {checkpoint_path}", flush=True)
-
-print(f'WS training complete.', flush = True)
-print(f"l = {mode} mode training completed successfully.", flush = True)
-print("="*60)
-
-plot_data_global = sorted(GBF_global.items())
-plot_omegas = [omega for omega, gbf in plot_data_global]
-plot_GBFs = [gbf for omega, gbf in plot_data_global]
-
-plt.figure(figsize = [6,4])
-plt.plot(plot_omegas, plot_GBFs, 'o-', color = 'red', label = 'Grey-body Factor')
-plt.xlabel(r'$\omega$', fontsize = 16)
-plt.ylabel(r'$\Gamma \left(\omega \right)$', fontsize = 16)
-plt.title(f'The Grey-Body Factor for l = {mode}'
-        "\n"
-        "Obtained via PINN")
-plt.grid()
-plt.legend()
-plt.savefig(f"./GBFWSData/l{mode}/GreyBodyFactor.png", format = 'png')
-plt.close()
-
-print(f"Full Grey-Body Factor figure saved to ./GBFWSData/l{mode}/GreyBodyFactor.png")
-print("="*60)
-
-numerical_csv_path = f"./Numerical/l{mode}/Output/numericalGBF.csv"
-
-if os.path.exists(numerical_csv_path):
-    print("Numerical csv found. Generating comparison data...")
-
-    numerical_results = {}
-
-    with open(numerical_csv_path, "r", newline = "") as f:
-        reader = csv.DictReader(f)
-
-        for row in reader:
-            omega = float(row["omega"])
-            numerical_results[round(omega, 4)] = float(row["GBF"])
-
-    comparison_omegas = []
-    pinn_GBFs = []
-    numerical_GBFs = []
-    absolute_differences = []
-    relative_differences = []
-
-    for omega in omega_schedule:
-        key = round(float(omega), 4)
-
-        if key not in numerical_results:
-            raise ValueError(f"No numerical result found for omega = {omega:.4f}")
-
-        if key not in GBF_global:
-            raise ValueError(f"No PINN result found for omega = {omega:.4f}")
-
-        pinn_gbf = float(GBF_global[key])
-        numerical_gbf = float(numerical_results[key])
-
-        comparison_omegas.append(float(omega))
-        pinn_GBFs.append(pinn_gbf)
-        numerical_GBFs.append(numerical_gbf)
-        absolute_differences.append(abs(pinn_gbf - numerical_gbf))
-        relative_differences.append(abs(pinn_gbf - numerical_gbf)/abs(numerical_gbf))
-
-    comparison_csv_path = (f'./GBFWSRARData/l{mode}/PINN_vs_Numerical.csv')
-
-    with open(comparison_csv_path, 'w', newline = '') as f:
-        writer = csv.writer(f)
-
-        writer.writerow(['omega', 'PINN_GBF', 'Numerical_GBF','Absolute_Difference', 'Relative_Difference'])
-
-        for omega, pinn_gbf, numerical_gbf, abs_diff, rel_diff in zip(comparison_omegas, pinn_GBFs, numerical_GBFs, absolute_differences, relative_differences):
-            writer.writerow([ f'{omega:.8f}', f'{pinn_gbf:.12e}', f'{numerical_gbf:.12e}', f'{abs_diff:.12e}', f'{rel_diff:.12e}'])
-
-    comparison_omegas = np.array(comparison_omegas)
-    pinn_GBFs = np.array(pinn_GBFs)
-    numerical_GBFs = np.array(numerical_GBFs)
-    absolute_differences = np.array(absolute_differences)
-
-    plt.figure(figsize = [14, 6])
-    plt.subplot(1, 2, 1)
-    plt.suptitle("PINNWSRAR and Numerical GBF"
-                "\n"
-                f"l = {mode}")
-    plt.plot(comparison_omegas, numerical_GBFs, 'o-', label = 'Numerical')
-    plt.plot(comparison_omegas, pinn_GBFs,'x-', label = 'PINNWSRAR')
-    plt.ylabel(r"$\Gamma(\omega)$", fontsize = 16)
-    plt.xlabel(r"$\omega$", fontsize = 16)
-    plt.legend()
-    plt.grid()
-    plt.tight_layout()
-
-    plt.subplot(1, 2, 2)
-    plt.plot(comparison_omegas, numerical_GBFs, 'o-', label = 'Numerical')
-    plt.plot(comparison_omegas, pinn_GBFs,'x-', label = 'PINNWSRAR')
-    plt.ylabel(r"$\Gamma(\omega)$", fontsize = 16)
-    plt.xlabel(r"$\omega$", fontsize = 16)
-    plt.yscale('log')
-    plt.legend()
-    plt.grid()
-    plt.tight_layout()
-    plt.savefig(f'./GBFWSRARData/l{mode}/PINNvsNumerical.png', format = 'png')
-    plt.close()
-
-    plt.figure(figsize = [14, 6])
-    plt.subplot(1, 2, 1)
-    plt.suptitle("PINNWSRAR and Numerical GBF"
-                "\n"
-                f"l = {mode}")
-    plt.plot(comparison_omegas, absolute_differences, 'o')
-    plt.ylabel(r"$\Gamma(\omega)$", fontsize = 16)
-    plt.xlabel(r"$\omega$", fontsize = 16)
-    plt.title("Absolute Difference", fontsize = 16)
-    plt.yscale("log")
-    plt.grid()
-    plt.tight_layout()
-
-    plt.subplot(1, 2, 2)
-    plt.plot(comparison_omegas, relative_differences, 'o')
-    plt.ylabel(r"$\Gamma(\omega)$", fontsize = 16)
-    plt.xlabel(r"$\omega$", fontsize = 16)
-    plt.title("Relative Difference", fontsize = 16)
-    plt.yscale("log")
-    plt.grid()
-    plt.tight_layout()
-    plt.savefig(f'./GBFWSRARData/l{mode}/PINNvsNumericalDifferences.png', format = 'png')
-    plt.close()
-
-else:
-    print("No numerical csv found. End of program.")
+print(f"Checkpoint saved to {checkpoint_path}", flush = True)
