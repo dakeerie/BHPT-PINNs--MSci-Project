@@ -537,7 +537,7 @@ def save_training_diagnostics(model, epoch_number, omega):
     plt.ylabel(r"$u(x, \omega)$", fontsize = 16)
     plt.title(f"Wavefunction, l = {mode}, omega = {omega:.4f}"
             "\n"
-            f"Epoch: {epoch_number + 1}")
+            f"Epoch: {epoch_number}")
     plt.grid()
     plt.legend()
     plt.tight_layout()
@@ -553,7 +553,7 @@ def save_training_diagnostics(model, epoch_number, omega):
     plt.ylabel('P & Q', fontsize = 16)
     plt.title(f"P & Q, l = {mode}, omega = {omega:.4f}"
             "\n"
-            f"Epoch: {epoch_number + 1}")
+            f"Epoch: {epoch_number}")
     plt.grid()
     plt.legend()
     plt.tight_layout()
@@ -767,7 +767,7 @@ for epoch in range(adam_iterations):
     hist_ode_im.append(loss_ode_imag.item())
 
     if (epoch + 1) % 100 == 0 or epoch == 0 or epoch == (adam_iterations - 1):
-            extraction_epochs.append(epoch)
+            extraction_epochs.append(epoch + 1)
             alpha, beta, prob, gbf = extraction(model, x_max, mass, mode, monitor_omega)
             alphas.append(alpha)
             betas.append(beta)
@@ -836,7 +836,6 @@ lbfgs_points_per_frequency = N_points//lbfgs_frequencies
 
 lbfgs_frequency_indices = np.linspace(0, len(omega_schedule) - 1, lbfgs_frequencies, dtype = int)
 lbfgs_omegas = [float(omega_schedule[i]) for i in lbfgs_frequency_indices]
-plot_omega = lbfgs_omegas[len(lbfgs_omegas)//2]
 
 x_tensor_lbfgs, omega_tensor_lbfgs = sample_frequency_batch(omega_values = lbfgs_omegas, n_points_per_frequency = lbfgs_points_per_frequency, x_max = x_max,
                                         dtype = DTYPE, device = device, rar_points_by_omega = rar_points_by_omega)
@@ -1067,8 +1066,7 @@ plt.tight_layout()
 plt.savefig(os.path.join(comparisons_dir, 'Final_GBF_Comparison_query.png'), format='png')
 plt.close()
 
-omega_mid = omega_schedule[len(omega_schedule)//2]
-final_alpha, final_beta, final_prob, final_gbf = extraction(model, x_max, mass, mode, omega_mid)
+final_alpha, final_beta, final_prob, final_gbf = extraction(model, x_max, mass, mode, monitor_omega)
 
 T = 1/final_alpha
 R = final_beta/final_alpha
@@ -1098,7 +1096,7 @@ with open(result_file_path, 'w') as f:
     f.write(f"final_ODE_loss = {final_ode_loss.item():.12e}\n")
     f.write(f"final_flux_loss = {final_flux_loss.item():.12e}\n")
 
-    f.write(f"mid_frequency = {omega_mid:.10f}\n")
+    f.write(f"monitor_frequency = {monitor_omega:.10f}\n")
     f.write(f"alpha_re = {final_alpha.real:.12e}\n")
     f.write(f"alpha_im = {final_alpha.imag:.12e}\n")
     f.write(f"beta_re = {final_beta.real:.12e}\n")
@@ -1124,7 +1122,7 @@ checkpoint = {'model_state_dict': model.state_dict(),
             'activation_config': {'type': 'keerie_adaptive_tanh', 'n': 10.0},
             'omega_input_scaling': {'omega_min': omega_min, 'omega_max': omega_max},
             'rar_config': {'interval': RAR_INTERVAL, 'candidates': RAR_CANDIDATES, 'add_per_refinement': RAR_ADD, 'max_points': RAR_MAX},
-            'ansatz_config': {'x_power': 3, 'x_safe_min': 1e-12, 'x_safe_max': 1 - 1e-3},
+            'ansatz_config': {'nn_output_scale': 1.0, 'x_power': 3, 'x_safe_min': 1e-12, 'x_safe_max': 1 - 1e-3},
             'mass': mass,
             'mode': mode,
             'x_max': x_max,
@@ -1132,6 +1130,7 @@ checkpoint = {'model_state_dict': model.state_dict(),
             'omega_schedule': omega_schedule.tolist(),
             'query_steps': args.query_steps,
             'diagnostic_omegas': diagnostic_omegas,
+            'monitor omega': monitor_omega,
             'x_diagnostic': x_diagnostic.tolist(),
 
             'adam_iterations': adam_iterations,
