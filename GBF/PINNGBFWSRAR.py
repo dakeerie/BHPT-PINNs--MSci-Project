@@ -274,8 +274,8 @@ def ansatz(model, x_tensor, mass, mode, omega):
     rstar = 2*mass/(1 - x_safe) + 2*mass*t.log(x_safe/(1 - x_safe))
     cs, sn = t.cos(2*omega*rstar), t.sin(2*omega*rstar)
 
-    u_re = 1 + c1_re*x_tensor + c2_re*x_tensor**2 + 100.0*x_tensor**3*(P_re + Q_re*cs - Q_im*sn)
-    u_im = c1_im*x_tensor + c2_im*x_tensor**2 + 100.0*x_tensor**3*(P_im + Q_im*cs + Q_re*sn)
+    u_re = 1 + c1_re*x_tensor + c2_re*x_tensor**2 + x_tensor**3*(P_re + Q_re*cs - Q_im*sn)
+    u_im = c1_im*x_tensor + c2_im*x_tensor**2 + x_tensor**3*(P_im + Q_im*cs + Q_re*sn)
     return u_re, u_im, P_re, P_im, Q_re, Q_im
 
 #Current loss function composed of ODE residual and Flux conservation requirement
@@ -493,7 +493,8 @@ for step_idx in range(start_step, len(omega_schedule)):
                 probability.append(prob)
                 GBF.append(gbf)
                 if (epoch + 1) % 500 ==0 or epoch == 0:
-                    print(f"""l = {mode}, omega = {omega:.4f} | Adam Epoch: {epoch + 1} / {adam_iterations}. Total scaled loss: {loss.item():.4e}, 
+                    print(f"""l = {mode}, omega = {omega:.4f} | omega {step_idx} / {len(omega_schedule)} | Adam Epoch: {epoch + 1} / {adam_iterations}. 
+                            Total scaled loss: {loss.item():.4e}, 
                             Flux loss: {loss_f.item():.4e},
                             ODE loss: {loss_o.item():.4e},
                             Real component of ODE loss: {loss_ode_real.item():.4e}, 
@@ -654,7 +655,8 @@ for step_idx in range(start_step, len(omega_schedule)):
                 probability.append(prob)
                 GBF.append(gbf)
                 
-                print(f"""l = {mode}, omega = {omega:.4f} | L-BFGS Epoch: {epoch + 1} / {lbfgs_iterations}. Total scaled loss: {info['total']:.4e}, 
+                print(f"""l = {mode}, omega = {omega:.4f} | omega {step_idx} / {len(omega_schedule)} | L-BFGS Epoch: {epoch + 1} / {lbfgs_iterations}. 
+                            Total scaled loss: {info['total']:.4e}, 
                             Flux loss: {info['flux']:.4e},
                             ODE loss: {info['ode']:.4e},
                             Real component of loss: {info['loss_re']:.4e}, 
