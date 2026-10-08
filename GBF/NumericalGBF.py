@@ -25,7 +25,7 @@ import argparse
 # modes = np.arange(2, 5)
 # omega = np.linspace(0.01, 2.0, 30)
 
-parser = argparse.ArgumentParser(description = "Train PINN for specific mode l")
+parser = argparse.ArgumentParser(description = "Compute numerical GBFs for a specific mode")
 parser.add_argument('--mass', type = float, required = True, help = "Black hole mass")
 parser.add_argument('--mode', type = int, required = True, help = 'The value of l (mode)')
 parser.add_argument('--x_extract', type = float, required = True, help = "GBF extraction coordinate")
@@ -38,6 +38,18 @@ args = parser.parse_args()
 mass = args.mass
 mode = args.mode
 x_extract = args.x_extract
+
+if args.omega_start <= 0 or args.omega_final <= 0:
+    raise ValueError("omega_start and omega_final must both be positive.")
+
+if args.num_steps < 1:
+    raise ValueError("num_steps must be at least 1.")
+
+if mass <= 0:
+    raise ValueError("mass must be positive.")
+
+if mode < 0:
+    raise ValueError("mode must be non-negative.")
 
 base_path = f'./Numerical/l{mode}'
 output_path = os.path.join(base_path, 'Output')
@@ -88,6 +100,9 @@ def system(x, Y, M, l, om):
 #     return u0, du0
 
 eps = 1e-6
+
+if not (eps < x_extract <= 1.0 - 1e-4):
+    raise ValueError(f"x_extract must be in ({eps}, {1.0 - 1e-4}].")
 # u0 = complex(1, 0)
 
 def extraction(sol, x_extract, mass, mode, omega):
@@ -150,13 +165,7 @@ for mode in modes:
                 )
 
         if (not sol.success) or np.any(~np.isfinite(sol.y)):
-            print(f"*** FAILED: l = {mode}, omega = {om:.4f} - status = {sol.status}: {sol.message}")
-            GBF = np.nan
-            alpha = beta = complex(np.nan, np.nan)
-            solutions[mode][om] = sol
-            results[mode][om] = {"GBF": np.nan, "flux_check": np.nan, "alpha": complex(np.nan, np.nan), "beta": complex(np.nan, np.nan),  "success": False,
-            }
-            continue
+            raise RuntimeError(f"Numerical solve failed: l = {mode}, omega = {om:.12g}, status = {sol.status}: {sol.message}")
 
         solutions[mode][om] = sol
 
@@ -207,49 +216,61 @@ if os.path.exists(csv_path):
     print(f"Existing numerical CSV found: {csv_path}")
     print("Loading previous numerical results...")
 
-    with open(csv_path, 'r', newline = '') as f:
+    with open(csv_path, "r", newline="") as f:
         reader = csv.DictReader(f)
         existing_rows = list(reader)
 
-    # existing_rows = [row for row in existing_rows if float(row['mass']) == mass and int(row['mode']) == mode]
-    existing_omegas = {round(float(row['omega']), 12) for row in existing_rows}
-
-    new_rows = []
-
-    for row in rows:
-        omega_key = round(float(row['omega']), 12)
-
-        if omega_key not in existing_omegas:
-            new_rows.append(row)
-
-    combined_rows = existing_rows + new_rows
-    combined_rows.sort(key = lambda row: float(row['omega']), reverse = True)
-
-    formatted_rows = [format_csv_row(row) for row in combined_rows]
-
-    with open(csv_path, 'w', newline = '') as f:
-        w = csv.DictWriter(f, fieldnames = fields)
-        w.writeheader()
-        w.writerows(formatted_rows)
-
-    print(f"Loaded {len(existing_rows)} existing rows.")
-    print(f"Added {len(new_rows)} new rows.")
-    print(f"Total rows in numerical CSV: {len(combined_rows)}.")
-
 else:
-    print(f"No existing numerical CSV found.")
+    print("No existing numerical CSV found.")
     print(f"Creating new numerical CSV: {csv_path}...")
+    existing_rows = []
 
-    rows.sort(key = lambda row: float(row['omega']), reverse = True)
+def row_key(row):
+    return (
+        round(float(row["mass"]), 12),
+        int(row["mode"]),
+        round(float(row["omega"]), 12),
+        round(float(row["x_extract"]), 12),
+    )
 
-    formatted_rows = [format_csv_row(row) for row in rows]
+# Keep results from other masses/extraction coordinates.
+# A new calculation replaces an existing row with the same key.
+rows_by_key = {row_key(row): row for row in existing_rows}
 
-    with open(csv_path, 'w', newline = '') as f:
-        w = csv.DictWriter(f, fieldnames = fields)
-        w.writeheader()
-        w.writerows(formatted_rows)
+added_rows = 0
+updated_rows = 0
 
-    print(f'Wrote {len(rows)} rows to {csv_path}')
+for row in rows:
+    key = row_key(row)
+
+    if key in rows_by_key:
+        updated_rows += 1
+    else:
+        added_rows += 1
+
+    rows_by_key[key] = row
+
+combined_rows = list(rows_by_key.values())
+
+combined_rows.sort(
+    key=lambda row: (
+        int(row["mode"]),
+        float(row["mass"]),
+        float(row["x_extract"]),
+        -float(row["omega"]),
+    )
+)
+
+formatted_rows = [format_csv_row(row) for row in combined_rows]
+
+with open(csv_path, "w", newline="") as f:
+    w = csv.DictWriter(f, fieldnames=fields)
+    w.writeheader()
+    w.writerows(formatted_rows)
+
+print(f"New rows added: {added_rows}")
+print(f"Existing rows updated: {updated_rows}")
+print(f"Total rows in numerical CSV: {len(combined_rows)}")
 
 if not args.post_processing:
     print("Post-processing not requested. Numerical CSV saved, solver finished.")
