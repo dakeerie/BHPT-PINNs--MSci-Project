@@ -764,7 +764,6 @@ lbfgs_iterations = 1000
 hist_epochs, hist_total, hist_flux, hist_ode, hist_ode_re, hist_ode_im, hist_weight = [], [], [], [], [], [], []
 diagnostic_model_states = []
 GBF, probability, alphas, betas, extraction_epochs = [], [], [], [], []
-N_points = 10000
 
 # RAR parameters
 RAR_INTERVAL = 1000       # refine every N Adam epochs
@@ -772,7 +771,8 @@ RAR_CANDIDATES = 5000     # candidate points tested at each refinement
 RAR_ADD = 250             # worst residual points added per refinement
 RAR_MAX = 2000            # maximum number of retained RAR points
 RAR_MIN_DX = 1e-4
-FREQUENCIES_PER_BATCH = min(4, len(omega_schedule))
+FREQUENCIES_PER_BATCH = min(6, len(omega_schedule))
+N_points = 9000*FREQUENCIES_PER_BATCH
 N_POINTS_PER_FREQUENCY = N_points//FREQUENCIES_PER_BATCH
 
 # RAR points are frequency-specific
