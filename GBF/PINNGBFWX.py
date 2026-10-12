@@ -24,18 +24,20 @@ parser = argparse.ArgumentParser(description = "Train PINN for specific mode l")
 parser.add_argument('--mass', type = float, required = True, help = "Black hole mass")
 parser.add_argument('--mode', type = int, required = True, help = 'The value of l (mode)')
 parser.add_argument('--x_extract', type = float, required = True, help = "GBF extraction coordinate")
-parser.add_argument('--omega_start', type = float, default = 0.3, help = 'Initial (higher) frequency')
-parser.add_argument('--omega_final', type = float, default = 0.03, help = 'Final (lower) frequency')
-parser.add_argument('--num_steps', type = int, default = 10, help = "Number of training frequency steps")
-parser.add_argument('--query_steps', type = int, default = 200, help = 'Number of frequencies used for dense post-training queries')
+parser.add_argument('--omega_start', type = float, default = 0.3, help = 'Upper bound of frequency range')
+parser.add_argument('--omega_final', type = float, default = 0.03, help = 'Lower bound of frequency range')
+parser.add_argument('--query_steps', type = int, default = 200, help = 'Number of frequencies used for post-training numerical comparison')
+parser.add_argument('--adam_steps', type = int, default = 36000, help = "Number of Adam Epochs")
+parser.add_argument('--lbfgs_steps', type = int, default = 1000, help = 'Number of outer L-BFGS step calls')
+
 
 args = parser.parse_args()
 mass = args.mass
 mode = args.mode
 x_max = args.x_extract
 
-if args.omega_start < args.omega_final:
-    raise ValueError("omega_final must be less than omega_start")
+if args.omega_start <= args.omega_final:
+    raise ValueError("omega_final must be strictly less than omega_start")
 
 if mass <= 0:
     raise ValueError("mass must be positive.")
@@ -46,11 +48,11 @@ if mode < 0:
 if args.omega_start <= 0 or args.omega_final <= 0:
     raise ValueError("Both frequencies must be positive.")
 
-if args.omega_start <= args.omega_final:
-    raise ValueError("omega_start must be strictly greater than omega_final.")
+if args.adam_steps < 2:
+    raise ValueError("adam_steps must be at least 2.")
 
-if args.num_steps < 1:
-    raise ValueError("num_steps must be at least 1.")
+if args.lbfgs_steps < 1:
+    raise ValueError("lbfgs_steps must be at least 1.")
 
 if args.query_steps < 1:
     raise ValueError("query_steps must be at least 1.")
@@ -59,10 +61,9 @@ if not (1e-6 < x_max <= 1.0 - 1e-3):
     raise ValueError("x_extract must be in (1e-6, 0.999] for the current ansatz clamp.")
 
 #Frequency schedule from high to low for continuation
-omega_schedule = np.linspace(args.omega_start, args.omega_final, args.num_steps)
 omega_min = float(args.omega_final)
 omega_max = float(args.omega_start)
-diagnostic_omegas = [float(omega_schedule[0]), float(omega_schedule[len(omega_schedule)//2]), float(omega_schedule[-1])]
+diagnostic_omegas = [omega_min, 0.5*(omega_min + omega_max), float(omega_max)]
 monitor_omega = diagnostic_omegas[1]
 x_diagnostic = np.linspace(1e-6, x_max, 5000)
 
@@ -228,7 +229,7 @@ def prepare_omega_tensor(omega, reference_tensor):
 
     return omega_tensor
 
-print(f"Initialising training for omega = {omega_schedule}")
+print(f"Training frequencies sampled uniformly from [{omega_min:.6f}, {omega_max:.6f}]", flush = True)
 
 beta_dist = dist.Beta(t.tensor([0.6], dtype = DTYPE, device = device), t.tensor([0.1], dtype = DTYPE, device = device))
 
@@ -241,29 +242,20 @@ def sample_x_points(n_points, x_max, dtype, device):
 
     return t.cat([x_uniform, x_edges], dim = 0)
 
-def sample_frequency_batch(omega_values, n_points_per_frequency, x_max, dtype, device, rar_points_by_omega = None):
+def sample_joint_batch(n_points, x_max, dtype, device, rar_x = None, rar_omega = None):
 
-    x_batches = []
-    omega_batches = []
+    x_base = sample_x_points(n_points = n_points, x_max = x_max, dtype = dtype, device = device)
 
-    for omega in omega_values:
-        x_base = sample_x_points(n_points_per_frequency, x_max, dtype, device)
+    omega_base = omega_min + (omega_max - omega_min)*t.rand((n_points, 1), dtype = dtype, device = device)
 
-        key = round(float(omega), 4)
+    if rar_x is not None and rar_omega is not None and rar_x.numel() > 0:
+        x_tensor = t.cat([x_base, rar_x.to(device = device, dtype = dtype)], dim = 0)
 
-        if (rar_points_by_omega is not None and key in rar_points_by_omega and rar_points_by_omega[key].numel() > 0):
-            x_slice = t.cat([x_base, rar_points_by_omega[key]], dim = 0)
+        omega_tensor = t.cat([omega_base, rar_omega.to(device = device, dtype = dtype)], dim = 0)
 
-        else:
-            x_slice = x_base
-
-        omega_slice = t.full_like(x_slice, float(omega))
-
-        x_batches.append(x_slice)
-        omega_batches.append(omega_slice)
-
-    x_tensor = t.cat(x_batches, dim = 0)
-    omega_tensor = t.cat(omega_batches, dim = 0)
+    else:
+        x_tensor = x_base
+        omega_tensor = omega_base
 
     x_tensor.requires_grad_(True)
 
@@ -297,55 +289,60 @@ def ode_residual_score(model, x_tensor, mass, mode,  omega, chunk_size = 2000):
 
     return t.cat(scores, dim = 0)
 
-def select_rar_points(model, n_candidates, n_add, x_max, mass, mode, omega, device, dtype, existing_rar_points = None, min_dx = 1e-3):
-    """Sample candidate points, rank them by ODE residual and retain the highest-residual points subject to a minimum separation in x."""
+def select_rar_joint_points(model, n_candidates, n_add, x_max, mass, mode, device, dtype, existing_rar_x = None, existing_rar_omega = None, min_joint_distance = 0.01):
 
-    x_candidates = sample_x_points(n_candidates, x_max, dtype, device)
-    scores = ode_residual_score(model, x_candidates, mass, mode, omega)
+    empty = t.empty((0, 1), dtype = dtype, device = device)
 
-    n_add = min(n_add, x_candidates.shape[0])
+    if n_add <= 0:
+        return empty, empty, t.empty((0,), dtype = dtype, device = device)
 
-    ranked_indices = t.argsort(scores, descending =  True)
-    candidate_x = x_candidates.flatten().detach().cpu().numpy()
+    x_candidates = sample_x_points(n_candidates, x_max, dtype = dtype, device = device)
 
-    if existing_rar_points is not None and existing_rar_points.numel() > 0:
-        occupied_x = existing_rar_points.flatten().detach().cpu().numpy().tolist()
-        occupied_x.sort()
+    omega_candidates = omega_min + (omega_max - omega_min)*t.rand((n_candidates, 1), dtype = dtype, device = device)
+
+    scores = ode_residual_score(model, x_candidates, mass, mode, omega_candidates)
+
+    candidate_x_np = x_candidates.flatten().detach().cpu().numpy()
+    candidate_omega_np = omega_candidates.flatten().detach().cpu().numpy()
+
+    candidate_points = np.column_stack((candidate_x_np/x_max, (candidate_omega_np - omega_min)/(omega_max - omega_min)))
+
+    if existing_rar_x is not None and existing_rar_omega is not None and existing_rar_x.numel() > 0:
+        old_x = existing_rar_x.flatten().detach().cpu().numpy()
+        old_omega = existing_rar_omega.flatten().detach().cpu().numpy()
+
+        occupied_points = np.column_stack((old_x/x_max, (old_omega - omega_min)/(omega_max - omega_min)))
+
     else:
-        occupied_x = []
+        occupied_points = np.empty((0, 2), dtype = float)
 
+    ranked_indices = t.argsort(scores, descending = True).cpu().numpy()
     accepted_indices = []
 
-    for idx in ranked_indices.detach().cpu().numpy():
-        x_value = float(candidate_x[idx])
+    for idx in ranked_indices:
+        point = candidate_points[idx]
 
-        insertion_index = bisect.bisect_left(occupied_x, x_value)
+        if occupied_points.shape[0] == 0:
+            nearest_distance = np.inf
 
-        if insertion_index > 0:
-            dx_left = x_value - occupied_x[insertion_index  - 1]
         else:
-            dx_left = np.inf
+            distances = np.linalg.norm(occupied_points - point, axis = 1)
+            nearest_distance = float(np.min(distances))
 
-        if insertion_index < len(occupied_x):
-            dx_right = occupied_x[insertion_index] - x_value
-        else:
-            dx_right = np.inf
-
-        nearest_dx = min(dx_left, dx_right)
-
-        if nearest_dx >= min_dx:
-            accepted_indices.append(idx)
-            bisect.insort(occupied_x, x_value)
+        if nearest_distance >= min_joint_distance:
+            accepted_indices.append(int(idx))
+            occupied_points = np.vstack((occupied_points, point))
 
         if len(accepted_indices) >= n_add:
             break
 
-    accepted_indices = t.tensor(accepted_indices, dtype = t.long, device = x_candidates.device)
+    selected = t.as_tensor(accepted_indices, dtype = t.long, device = x_candidates.device)
 
-    new_points = x_candidates[accepted_indices].detach()
-    new_scores = scores[accepted_indices].detach()
+    new_x = x_candidates[selected].detach()
+    new_omega = omega_candidates[selected].detach()
+    new_scores = scores[selected].detach()
 
-    return new_points, new_scores
+    return new_x, new_omega, new_scores
 
 #Ansatz for the wave-function u
 #Ansatz is of the form u(x) = 1 + c1*x + c2*x**2 + 100*(P + exp(2i*omega*r_star)*Q) 
@@ -719,6 +716,60 @@ def save_comparison_plots(omegas, pinn_gbfs, numerical_gbfs, absolute_difference
     plt.savefig(os.path.join(comparisons_dir, f'{prefix}_Differences.png'), format='png')
     plt.close()
 
+def plot_joint_residual_heatmap(model, epoch, mass, mode, x_max, rar_x = None, rar_omega = None, nx = 120, n_omega = 120, chunk_size = 2000):
+
+    x_axis = np.linspace(1e-6, x_max, nx)
+    omega_axis = np.linspace(omega_min, omega_max, n_omega)
+
+    X, W = np.meshgrid(x_axis, omega_axis, indexing = 'xy')
+
+    x_grid = t.as_tensor(X.reshape(-1, 1), dtype = DTYPE, device = device)
+    omega_grid = t.as_tensor(W.reshape(-1, 1), dtype = DTYPE, device = device)
+
+    x_grid.requires_grad_(True)
+
+    residual_squared = ode_residual_score(model = model, x_tensor = x_grid, mass = mass, mode = mode, omega = omega_grid, chunk_size = chunk_size)
+    residual_squared = residual_squared.detach().cpu().numpy().reshape(n_omega, nx)
+
+    residual_magnitude = np.sqrt(np.maximum(residual_squared, 0.0))
+
+    log_residual = np.log10(np.maximum(residual_magnitude, 1e-30))
+
+    fig, ax = plt.subplots(figsize = (10, 6))
+    heatmap = ax.pcolormesh(X, W, log_residual, shading = 'auto', cmap = 'magma')
+    colorbar = fig.colorbar(heatmap, ax = ax)
+    colorbar.set_label(r"$\log_{10} |Res|$")
+
+    if rar_x is not None and rar_omega is not None and rar_x.numel() > 0:
+        rar_x_np = rar_x.detach().cpu().numpy().flatten()
+        rar_omega_np = rar_omega.detach().cpu().numpy().flatten()
+
+        ax.scatter(rar_x_np, rar_omega_np, s = 10, facecolors = "none", edgecolors = "white", linewidths = 0.5, alpha = 0.7, label = "Retained RAR points", zorder = 3)
+        ax.legend(loc = "best")
+
+    ax.set_xlabel(r"$x$", fontsize = 16)
+    ax.set_ylabel(r"$\omega$", fontsize = 16)
+    ax.set_title(rf"ODE Residual over $(x, \omega)$ Domain"
+                "\n"
+                rf"$l = {mode}$, Adam epoch {epoch}")
+    ax.set_xlim(x_axis[0], x_axis[-1])
+    ax.set_ylim(omega_min, omega_max)
+
+    fig.tight_layout()
+
+    png_path = os.path.join(rar_dir, f"residual_heatmap_epoch_{(epoch + 1):06d}.png")
+    fig.savefig(png_path, dpi = 200, bbox_inches = "tight")
+
+    npz_path = os.path.join(rar_dir, f"residual_heatmap_epoch_{(epoch + 1):.06d}.npz")
+
+    rar_x_save = rar_x.detach().cpu().numpy().flatten() if rar_x is not None else np.empty(0)
+    rar_omega_save = rar_omega.detach().cpu().numpy().flatten() if rar_omega is not None else np.empty(0)
+
+    np.savez_compressed(npz_path, x = x_axis, omega = omega_axis, residual_magnitude = residual_magnitude, log10_residual = log_residual, rar_x = rar_x_save, rar_omega = rar_omega_save)
+
+    print(f"Saved RAR residual heatmap: {png_path}", flush = True)
+
+
 #Setup PINN logistics
 #Seed included for reproducibility
 t.manual_seed(0)
@@ -731,6 +782,7 @@ diagnostic_dir = os.path.join(base_path, 'diagnostics')
 results_dir = os.path.join(base_path, 'results')
 comparisons_dir = os.path.join(base_path, 'comparisons')
 final_plots_dir = os.path.join(diagnostic_dir, "final")
+rar_dir = os.path.join(diagnostic_dir, "RAR")
 
 os.makedirs(base_path, exist_ok=True)
 os.makedirs(checkpoint_dir, exist_ok = True)
@@ -738,6 +790,7 @@ os.makedirs(diagnostic_dir, exist_ok = True)
 os.makedirs(results_dir, exist_ok = True)
 os.makedirs(comparisons_dir, exist_ok = True)
 os.makedirs(final_plots_dir, exist_ok = True)
+os.makedirs(rar_dir, exist_ok = True)
 
 loss_history_dir = os.path.join(diagnostic_dir, "loss_history.csv")
 
@@ -752,8 +805,8 @@ with open(loss_history_dir, 'w', newline = '') as f:
 learning_rate = 1e-3
 optimiser = optim.Adam(model.parameters(), lr = learning_rate)
 
-adam_iterations = 18000 
-lbfgs_iterations = 1000 
+adam_iterations = args.adam_steps 
+lbfgs_iterations = args.lbfgs_steps
 
 # if is_first_frequency_of_run:
 #     print("First frequency of this run- using larger training budget.")
@@ -765,28 +818,26 @@ hist_epochs, hist_total, hist_flux, hist_ode, hist_ode_re, hist_ode_im, hist_wei
 diagnostic_model_states = []
 GBF, probability, alphas, betas, extraction_epochs = [], [], [], [], []
 
-# RAR parameters
-RAR_INTERVAL = 1000       # refine every N Adam epochs
-RAR_CANDIDATES = 5000     # candidate points tested at each refinement
-RAR_ADD = 250             # worst residual points added per refinement
-RAR_MAX = 2000            # maximum number of retained RAR points
-RAR_MIN_DX = 1e-4
-FREQUENCIES_PER_BATCH = min(6, len(omega_schedule))
-N_points = 9000*FREQUENCIES_PER_BATCH
-N_POINTS_PER_FREQUENCY = N_points//FREQUENCIES_PER_BATCH
+#Base number of paired (x, omega) samples in each Adam epoch.
+N_points = 10000
 
-# RAR points are frequency-specific
-rar_points_by_omega = {round(float(omega), 4): t.empty((0, 1), dtype = DTYPE, device = device) for omega in omega_schedule}
+#Joint residual-based adaptive refinement
+RAR_INTERVAL = 1000
+RAR_CANDIDATES = 5000
+RAR_ADD = 250
+RAR_MAX = 2000
+RAR_MIN_JOINT_DISTANCE = 0.01
+RAR_HEATMAP_INTERVAL = 5000
+RAR_HEATMAP_NX = 120
+RAR_HEATMAP_NOMEGA = 120
+
+rar_x = t.empty((0, 1), dtype = DTYPE, device = device)
+rar_omega = t.empty((0, 1), dtype = DTYPE, device = device)
 
 #Adam loop
 for epoch in range(adam_iterations):
 
-    frequency_indices = t.randperm(len(omega_schedule), device = device)[:FREQUENCIES_PER_BATCH]
-
-    batch_omegas = [float(omega_schedule[i]) for i in frequency_indices.cpu().numpy()]
-
-    x_tensor, omega_tensor = sample_frequency_batch(omega_values = batch_omegas, n_points_per_frequency = N_POINTS_PER_FREQUENCY, x_max = x_max, dtype = DTYPE, device = device,
-                            rar_points_by_omega = rar_points_by_omega)
+    x_tensor, omega_tensor = sample_joint_batch(n_points = N_points, x_max = x_max, dtype = DTYPE, device = device, rar_x = rar_x, rar_omega = rar_omega)
 
     optimiser.zero_grad(set_to_none = True)
 
@@ -820,7 +871,7 @@ for epoch in range(adam_iterations):
 
             if (epoch + 1) % 500 == 0 or epoch == 0:
                 print(f"""l = {mode} | Adam Epoch: {epoch + 1} / {adam_iterations}. 
-                        Batch omegas = {batch_omegas},
+                        Batch omegas min|max|mean: {omega_tensor.min().item():.4f} | {omega_tensor.max().item():.4f} | {omega_tensor.mean().item():.4f},
                         Diagnostic omegas = {[f"{om:.4f}" for om in diagnostic_omegas]},
                         Total scaled loss: {loss.item():.4e}, 
                         Flux loss: {loss_f.item():.4e},
@@ -840,49 +891,42 @@ for epoch in range(adam_iterations):
 
 #Residual-based adapative refinement using the complex ODE residual
 
-    if ((epoch + 1) % RAR_INTERVAL == 0 and (epoch + 1) < adam_iterations):
+    if (epoch + 1) % RAR_INTERVAL == 0 and (epoch + 1) < adam_iterations and rar_x.shape[0] < RAR_MAX:
+            print("-"*60)
 
-        print("-"*60)
-        print(f"RAR triggered at Adam epoch {epoch + 1}: Refining the frequencies in this batch...")
+            print(f"Joint RAR triggered at Adam epoch {epoch + 1}...", flush  = True)
 
-        for omega in batch_omegas:
+            n_add = min(RAR_ADD, RAR_MAX - rar_x.shape[0])
 
-            key = round(float(omega), 4)
+            new_rar_x, new_rar_omega, new_rar_scores = select_rar_joint_points(model = model, n_candidates = RAR_CANDIDATES, n_add = n_add, x_max = x_max, mass = mass,
+                                mode = mode, device = device, dtype = DTYPE, existing_rar_x = rar_x, existing_rar_omega = rar_omega, min_joint_distance = RAR_MIN_JOINT_DISTANCE)
 
-            current_rar_points = rar_points_by_omega[key]
-            if current_rar_points.shape[0] >= RAR_MAX:
-                continue
-
-            n_add = min(RAR_ADD, RAR_MAX - current_rar_points.shape[0])
-
-            new_rar_points, new_rar_scores = select_rar_points(model = model, n_candidates = RAR_CANDIDATES, n_add = n_add, x_max = x_max,
-                mass = mass, mode = mode, omega = omega, device = device, dtype = DTYPE, existing_rar_points = current_rar_points, min_dx = RAR_MIN_DX)
-
-            rar_points_by_omega[key] = t.cat([current_rar_points, new_rar_points], dim = 0)
-
-            actual_added = new_rar_points.shape[0]
-
-            print(f"omega = {omega:.4f}: added {actual_added} RAR points (requested {n_add}). Total RAR points = {rar_points_by_omega[key].shape[0]}")
+            actual_added = new_rar_x.shape[0]
 
             if actual_added > 0:
-                print(f"Maximum selected ODE residual = {new_rar_scores.max().item():.4e}")
-                print(f"RAR x range = [{new_rar_points.min().item():.6f}, {new_rar_points.max().item():.6f}]")
+                rar_x = t.cat([rar_x, new_rar_x], dim = 0)
+                rar_omega = t.cat([rar_omega, new_rar_omega], dim = 0)
+
+                print(f"Added {actual_added} joint RAR points. Total retained = {rar_x.shape[0]}", flush = True)
+                print(f"RAR x range = [{new_rar_x.min().item():.6f}, {new_rar_x.min().item():.6f}]", flush = True)
+                print(f"RAR omega range = [{new_rar_omega.min().item():.6f}, {new_rar_omega.max().item():.6f}]", flush = True)
+
+                print(f"Maximum selected ODE residual = {new_rar_scores.max().item():.4e}", flush = True)
+
+            else:
+                print("No additional RAR points met the separation constraint.")
 
             print("-"*60)
+
+    if (epoch + 1) % RAR_HEATMAP_INTERVAL == 0:
+        plot_joint_residual_heatmap(model = model, epoch = epoch + 1, mass = mass, mode = mode, x_max = x_max, rar_x = rar_x, rar_omega = rar_omega,
+                                nx = RAR_HEATMAP_NX, n_omega = RAR_HEATMAP_NOMEGA, chunk_size = 2000)
 
 print("Adam training complete. Switching to L-BFGS:", flush = True)
 print("="*60)
 lbfgs_optimiser = optim.LBFGS(model.parameters(), lr = 1.0, max_iter = 20,  history_size = 50, line_search_fn = "strong_wolfe")
 
-
-lbfgs_frequencies = min(5, len(omega_schedule))
-lbfgs_points_per_frequency = N_points//lbfgs_frequencies
-
-lbfgs_frequency_indices = np.linspace(0, len(omega_schedule) - 1, lbfgs_frequencies, dtype = int)
-lbfgs_omegas = [float(omega_schedule[i]) for i in lbfgs_frequency_indices]
-
-x_tensor_lbfgs, omega_tensor_lbfgs = sample_frequency_batch(omega_values = lbfgs_omegas, n_points_per_frequency = lbfgs_points_per_frequency, x_max = x_max,
-                                        dtype = DTYPE, device = device, rar_points_by_omega = rar_points_by_omega)
+x_tensor_lbfgs, omega_tensor_lbfgs = sample_joint_batch(n_points = N_points, x_max = x_max, dtype = DTYPE, device = device, rar_x = rar_x, rar_omega = rar_omega)
 
 flux_weight = annealing(adam_iterations - 1, adam_iterations)
 
@@ -936,7 +980,7 @@ for epoch in range(lbfgs_iterations):
         GBF.append(gbf)
         
         print(f"""l = {mode} | L-BFGS Epoch: {epoch + 1} / {lbfgs_iterations}. 
-                    L-BFGS omegas = {lbfgs_omegas},
+                    Fixed-batch omega min|max = {omega_tensor_lbfgs.min().item():.4f} | {omega_tensor_lbfgs.max().item():.4f},
                     Diagnostic omegas = {[f"{om:.4f}" for om in diagnostic_omegas]},
                     Total scaled loss: {info['total']:.4e}, 
                     Flux loss: {info['flux']:.4e},
@@ -952,25 +996,6 @@ for epoch in range(lbfgs_iterations):
 print("Conditional PINN training complete.", flush = True)
 
 
-training_query_results = query_gbf(model, mass, mode, omega_schedule, x_max)
-training_omegas = np.array([result['omega'] for result in training_query_results])
-training_gbfs = np.array([result['gbf'] for result in training_query_results])
-training_gbf_path = os.path.join(results_dir, "PINN_training_frequencies.csv")
-
-with open(training_gbf_path, 'w', newline = '') as f:
-    writer = csv.writer(f)
-
-    writer.writerow(['omega', 'alpha_re', 'alpha_im', 'beta_re',  'beta_im', 'prob', 'PINN_GBF'])
-
-    for result in training_query_results:
-        writer.writerow([f"{result['omega']:.10f}", f"{result['alpha'].real:.12e}", f"{result['alpha'].imag:.12e}", f"{result['beta'].real:.12e}", f"{result['beta'].imag:.12e}",
-                f"{result['probability']:.12e}", f"{result['gbf']:.12e}"])
-
-GBF_global = {}
-for result in training_query_results:
-    key = round(result['omega'], 4)
-    GBF_global[key] = result['gbf']
-
 omega_query = np.linspace(omega_min, omega_max, args.query_steps)
 dense_query_results = query_gbf(model, mass, mode, omega_query, x_max)
 dense_query_omegas = np.array([result['omega'] for result in dense_query_results])
@@ -983,7 +1008,7 @@ with open(query_gbf_path, 'w', newline = '') as f:
     writer.writerow(['omega', 'alpha_re', 'alpha_im', 'beta_re',  'beta_im', 'prob', 'PINN_GBF'])
 
     for result in dense_query_results:
-            writer.writerow([f"{result['omega']:.10f}", f"{result['alpha'].real:.12e}", f"{result['alpha'].imag:.12e}", f"{result['beta'].real:12e}", f"{result['beta'].imag:.12e}",
+            writer.writerow([f"{result['omega']:.10f}", f"{result['alpha'].real:.12e}", f"{result['alpha'].imag:.12e}", f"{result['beta'].real:.12e}", f"{result['beta'].imag:.12e}",
                     f"{result['probability']:.12e}", f"{result['gbf']:.12e}"])
 
 
@@ -1071,30 +1096,10 @@ numerical_results = load_numerical_gbf(numerical_csv_path, mass, mode, x_max)
 
 print(f"Loaded {len(numerical_results)} numerical results.")
 
-training_comparison_csv = os.path.join(comparisons_dir, "PINN_vs_Numerical_training.csv")
-training_comparison_omegas, training_pinn_gbfs, training_numerical_gbfs, training_absolute_differences, training_relative_differences = compare_pinn_to_numerical(training_query_results,
-                    numerical_results, training_comparison_csv)
-save_comparison_plots(training_comparison_omegas, training_pinn_gbfs, training_numerical_gbfs, training_absolute_differences, training_relative_differences, 
-                    "Training Frequencies", "training")
-
 query_comparison_csv = os.path.join(comparisons_dir, "PINN_vs_Numerical_query.csv")
 query_comparison_omegas, query_pinn_gbfs, query_numerical_gbfs, query_absolute_differences, query_relative_differences = compare_pinn_to_numerical(dense_query_results,
                     numerical_results, query_comparison_csv) 
 save_comparison_plots(query_comparison_omegas, query_pinn_gbfs, query_numerical_gbfs, query_absolute_differences, query_relative_differences, "Dense Query Frequencies", "query")
-
-plt.figure(figsize=[7, 5])
-
-plt.plot(training_comparison_omegas, training_numerical_gbfs, 'o-', label='Numerical')
-plt.plot(training_comparison_omegas, training_pinn_gbfs, 'x-', label='Two-input PINN')
-plt.xlabel(r'$\omega$', fontsize = 16)
-plt.ylabel(r'$\Gamma(\omega)$', fontsize = 16)
-plt.title(f'Grey-Body Factor, l = {mode}')
-plt.grid()
-plt.legend()
-plt.tight_layout()
-
-plt.savefig(os.path.join(comparisons_dir, 'Final_GBF_Comparison_training.png'), format='png')
-plt.close()
 
 plt.figure(figsize=[7, 5])
 
@@ -1119,7 +1124,6 @@ final_loss_data = compute_loss(model, x_tensor_lbfgs, mass, mode, omega_tensor_l
 
 _, _, _, final_total_loss, final_flux_loss, final_ode_loss, _, _, *_ = final_loss_data
 
-training_relative_finite = training_relative_differences[np.isfinite(training_relative_differences)]
 query_relative_finite = query_relative_differences[np.isfinite(query_relative_differences)]
 
 result_file_path = os.path.join(results_dir, 'result.txt')
@@ -1132,7 +1136,11 @@ with open(result_file_path, 'w') as f:
 
     f.write(f"omega_min = {omega_min:.10f}\n")
     f.write(f"omega_max = {omega_max:.10f}\n")
-    f.write(f"training_frequencies = {len(omega_schedule)}\n")
+    f.write("training_omega_sampling = uniform_random_per_collocation\n")
+    f.write(f"Adam_iterations = {adam_iterations}\n")
+    f.write(f"Adam_base_points_per_epoch = {N_points}\n")
+    f.write(f"rar_points_final = {rar_x.shape[0]}\n")
+    f.write(f"lbfgs_iterations_requested = {lbfgs_iterations}\n")
     f.write(f"query_frequencies = {len(omega_query)}\n")
     f.write("diagnostic_frequencies = " + ", ".join(f"{om:.10f}" for om in diagnostic_omegas) + "\n")
 
@@ -1154,8 +1162,6 @@ with open(result_file_path, 'w') as f:
     f.write(f"mid_frequency_prob = {final_prob:.12e}\n")
     f.write(f"monitor_frequency_GBF = {final_gbf:.12e}\n")
 
-    f.write(f"training_mean_relative_error = {np.mean(training_relative_finite):.12e}\n")
-    f.write(f"training_max_relative_error = {np.max(training_relative_finite):.12e}\n")
     f.write(f"query_mean_relative_error = {np.mean(query_relative_finite):.12e}\n")
     f.write(f"query_max_relative_error = {np.max(query_relative_finite):.12e}\n")
 
@@ -1165,13 +1171,15 @@ checkpoint = {'model_state_dict': model.state_dict(),
             'model_architecture': {'in_channels': 2, 'out_channels': 4, 'hidden_channels': 32, 'hidden_layers': 3},
             'activation_config': {'type': 'keerie_adaptive_tanh', 'n': 10.0},
             'omega_input_scaling': {'omega_min': omega_min, 'omega_max': omega_max},
-            'rar_config': {'interval': RAR_INTERVAL, 'candidates': RAR_CANDIDATES, 'add_per_refinement': RAR_ADD, 'max_points': RAR_MAX},
+            'rar_config': {'interval': RAR_INTERVAL, 'candidates': RAR_CANDIDATES, 'add_per_refinement': RAR_ADD, 'max_points': RAR_MAX, 'min_joint_distance': RAR_MIN_JOINT_DISTANCE},
             'ansatz_config': {'nn_output_scale': 1.0, 'x_power': 3, 'x_safe_min': 1e-12, 'x_safe_max': 1 - 1e-3},
             'mass': mass,
             'mode': mode,
             'x_max': x_max,
 
-            'omega_schedule': omega_schedule.tolist(),
+            'omega_range': {'min': omega_min, 'max': omega_max},
+            'training_omega_sampling': 'uniform_random_per_collocation_point',
+            'adam_base_points_per_epoch': N_points,
             'query_steps': args.query_steps,
             'diagnostic_omegas': diagnostic_omegas,
             'monitor_omega': monitor_omega,
@@ -1183,7 +1191,7 @@ checkpoint = {'model_state_dict': model.state_dict(),
             'flux_weight_initial': 10.0,
             'flux_weight_final': 1.0,
 
-            'rar_points_by_omega': {key: value.detach().cpu() for key, value in rar_points_by_omega.items()},
+            'rar_points': {'x': rar_x.detach().cpu(), 'omega': rar_omega.detach().cpu()},
 
             'training_history': {'epochs': [int(value) for value in hist_epochs], 'total_loss': [float(value) for value in hist_total], 'flux_loss': [float(value) for value in hist_flux],
                         'ode_loss': [float(value) for value in hist_ode], 'ode_real_loss': [float(value) for value in hist_ode_re], 'ode_imag_loss': [float(value) for value in hist_ode_im],
@@ -1193,20 +1201,16 @@ checkpoint = {'model_state_dict': model.state_dict(),
                                     'beta_re': [float(value.real) for value in betas], 'beta_im': [float(value.imag) for value in betas], 'probability': [float(value) for value in probability],
                                     'gbf': [float(value) for value in GBF]},
 
-            'training_query_results': serialise_query_results(training_query_results),
             'dense_query_results': serialise_query_results(dense_query_results),
 
             'numerical_results': [{'omega': float(omega), 'gbf': float(gbf)} for omega, gbf in sorted(numerical_results.items())],
-
-            'training_comparison': {'omega': training_comparison_omegas.tolist(), 'pinn_gbf': training_pinn_gbfs.tolist(), 'numerical_gbf': training_numerical_gbfs.tolist(),
-                                'absolute_difference': training_absolute_differences.tolist(), 'relative_difference': training_relative_differences.tolist()},
 
             'query_comparison': {'omega': query_comparison_omegas.tolist(), 'pinn_gbf': query_pinn_gbfs.tolist(), 'numerical_gbf': query_numerical_gbfs.tolist(),
                                 'absolute_difference': query_absolute_differences.tolist(), 'relative_difference': query_relative_differences.tolist()},
 
             'diagnostic_model_states': diagnostic_model_states,
             'lbfgs_success': bool(lbfgs_success),
-            'training_complete': True}
+            'training_complete': bool(lbfgs_success)}
 
 checkpoint_path = os.path.join(checkpoint_dir, f'pinn_conditional_GBFWX_l{mode}.pth')
 
