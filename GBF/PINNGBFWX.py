@@ -751,16 +751,16 @@ def plot_joint_residual_heatmap(model, epoch, mass, mode, x_max, rar_x = None, r
     ax.set_ylabel(r"$\omega$", fontsize = 16)
     ax.set_title(rf"ODE Residual over $(x, \omega)$ Domain"
                 "\n"
-                rf"$l = {mode}$, Adam epoch {epoch}")
+                rf"$l = {mode}$, Adam epoch {epoch + 1}")
     ax.set_xlim(x_axis[0], x_axis[-1])
     ax.set_ylim(omega_min, omega_max)
 
     fig.tight_layout()
 
-    png_path = os.path.join(rar_dir, f"residual_heatmap_epoch_{(epoch + 1):06d}.png")
+    png_path = os.path.join(rar_dir, f"residual_heatmap_epoch_{epoch + 1}.png")
     fig.savefig(png_path, dpi = 200, bbox_inches = "tight")
 
-    npz_path = os.path.join(rar_dir, f"residual_heatmap_epoch_{(epoch + 1):.06d}.npz")
+    npz_path = os.path.join(rar_dir, f"residual_heatmap_epoch_{epoch + 1}.npz")
 
     rar_x_save = rar_x.detach().cpu().numpy().flatten() if rar_x is not None else np.empty(0)
     rar_omega_save = rar_omega.detach().cpu().numpy().flatten() if rar_omega is not None else np.empty(0)
@@ -919,7 +919,7 @@ for epoch in range(adam_iterations):
             print("-"*60)
 
     if (epoch + 1) % RAR_HEATMAP_INTERVAL == 0:
-        plot_joint_residual_heatmap(model = model, epoch = epoch + 1, mass = mass, mode = mode, x_max = x_max, rar_x = rar_x, rar_omega = rar_omega,
+        plot_joint_residual_heatmap(model = model, epoch = epoch, mass = mass, mode = mode, x_max = x_max, rar_x = rar_x, rar_omega = rar_omega,
                                 nx = RAR_HEATMAP_NX, n_omega = RAR_HEATMAP_NOMEGA, chunk_size = 2000)
 
 print("Adam training complete. Switching to L-BFGS:", flush = True)
