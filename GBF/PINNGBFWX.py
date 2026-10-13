@@ -229,9 +229,10 @@ def prepare_omega_tensor(omega, reference_tensor):
 
     return omega_tensor
 
-print(f"Training frequencies sampled uniformly from [{omega_min:.6f}, {omega_max:.6f}]", flush = True)
+print(f"Training frequencies: 60% uniform + 40% Beta(0.6, 2.0) on [{omega_min:.6f}, {omega_max:.6f}]", flush = True)
 
 beta_dist = dist.Beta(t.tensor([0.6], dtype = DTYPE, device = device), t.tensor([0.1], dtype = DTYPE, device = device))
+omega_beta_dist = dist.Beta(t.tensor([0.6], dtype = DTYPE, device = device), t.tensor([2.0], dtype = DTYPE, device = device))
 
 def sample_x_points(n_points, x_max, dtype, device):
     n_uniform = int(0.6*n_points)
@@ -242,11 +243,25 @@ def sample_x_points(n_points, x_max, dtype, device):
 
     return t.cat([x_uniform, x_edges], dim = 0)
 
+def sample_omega_points(n_points, dtype, device):
+    n_uniform = int(0.6 * n_points)
+    n_beta = n_points - n_uniform
+
+    omega_uniform = omega_min + (omega_max - omega_min)*t.rand((n_uniform, 1), dtype=dtype, device=device)
+
+    beta_samples = omega_beta_dist.sample((n_beta,)).reshape(-1, 1)
+    omega_beta = omega_min + (omega_max - omega_min)*beta_samples
+
+    omega_samples = t.cat([omega_uniform, omega_beta], dim=0)
+
+    permutation = t.randperm(n_points, device=device)
+    return omega_samples[permutation]
+
 def sample_joint_batch(n_points, x_max, dtype, device, rar_x = None, rar_omega = None):
 
     x_base = sample_x_points(n_points = n_points, x_max = x_max, dtype = dtype, device = device)
 
-    omega_base = omega_min + (omega_max - omega_min)*t.rand((n_points, 1), dtype = dtype, device = device)
+    omega_base = sample_omega_points(n_points = n_points, dtype = dtype, device = device)
 
     if rar_x is not None and rar_omega is not None and rar_x.numel() > 0:
         x_tensor = t.cat([x_base, rar_x.to(device = device, dtype = dtype)], dim = 0)
@@ -288,6 +303,39 @@ def ode_residual_score(model, x_tensor, mass, mode,  omega, chunk_size = 2000):
         scores.append(score)
 
     return t.cat(scores, dim = 0)
+
+def residual_fields(model, x_tensor, mass, mode, omega, chunk_size = 2000):
+
+    omega_tensor = prepare_omega_tensor(omega, x_tensor)
+
+    ode_squared_chunks = []
+    flux_chunks = []
+
+    for x_chunk, omega_chunk in zip(x_tensor.split(chunk_size), omega_tensor.split(chunk_size)):
+
+        x_chunk = x_chunk.detach().clone().requires_grad_(True)
+        omega_chunk = omega_chunk.detach()
+
+        u_re, u_im, *_ = ansatz(model, x_chunk, mass, mode, omega_chunk)
+
+        du_re, d2u_re = grads(u_re, x_chunk)
+        du_im, d2u_im = grads(u_im, x_chunk)
+
+        A_ = A(x_chunk)
+        B_re, B_im = B(x_chunk, mass, omega_chunk)
+        C_ = C(x_chunk, mode)
+
+        res_re = A_*d2u_re + B_re*du_re - B_im*du_im + C_*u_re
+        res_im = A_*d2u_im + B_re*du_im + B_im*du_re +C_*u_im
+
+        ode_squared = res_re**2 + res_im**2
+
+        J = g(x_chunk, mass)*(u_re*du_im - u_im*du_re) - omega_chunk*(u_re**2 + u_im**2 - 1)
+
+        ode_squared_chunks.append(ode_squared.flatten().detach())
+        flux_chunks.append(J.flatten().detach())
+
+    return t.cat(ode_squared_chunks, dim = 0), t.cat(flux_chunks, dim = 0)
 
 def select_rar_joint_points(model, n_candidates, n_add, x_max, mass, mode, device, dtype, existing_rar_x = None, existing_rar_omega = None, min_joint_distance = 0.01):
 
@@ -345,7 +393,7 @@ def select_rar_joint_points(model, n_candidates, n_add, x_max, mass, mode, devic
     return new_x, new_omega, new_scores
 
 #Ansatz for the wave-function u
-#Ansatz is of the form u(x) = 1 + c1*x + c2*x**2 + 100*(P + exp(2i*omega*r_star)*Q) 
+#Ansatz is of the form u(x) = 1 + c1*x + c2*x**2 + (P + exp(2i*omega*r_star)*Q) 
 #where P and Q are complex with components corresponding to the four channel neural network output
 def ansatz(model, x_tensor, mass, mode, omega):
 
@@ -726,46 +774,58 @@ def plot_joint_residual_heatmap(model, epoch, mass, mode, x_max, rar_x = None, r
     x_grid = t.as_tensor(X.reshape(-1, 1), dtype = DTYPE, device = device)
     omega_grid = t.as_tensor(W.reshape(-1, 1), dtype = DTYPE, device = device)
 
-    x_grid.requires_grad_(True)
+    ode_squared, flux_values = residual_fields(model = model, x_tensor = x_grid, mass = mass, mode = mode, omega = omega_grid, chunk_size = chunk_size)
 
-    residual_squared = ode_residual_score(model = model, x_tensor = x_grid, mass = mass, mode = mode, omega = omega_grid, chunk_size = chunk_size)
-    residual_squared = residual_squared.detach().cpu().numpy().reshape(n_omega, nx)
+    ode_magnitude = t.sqrt(t.clamp(ode_squared, min = 0.0)).cpu().numpy()
+    ode_magnitude = ode_magnitude.reshape(n_omega, nx)
 
-    residual_magnitude = np.sqrt(np.maximum(residual_squared, 0.0))
+    flux_grid = flux_values.cpu().numpy().reshape(n_omega, nx)
 
-    log_residual = np.log10(np.maximum(residual_magnitude, 1e-30))
+    log_ode = np.log10(np.maximum(ode_magnitude, 1e-30))
+    log_flux = np.log10(np.maximum(np.abs(flux_grid), 1e-30))
 
-    fig, ax = plt.subplots(figsize = (8, 6))
-    heatmap = ax.pcolormesh(X, W, log_residual, shading = 'auto', cmap = 'autumn')
-    colorbar = fig.colorbar(heatmap, ax = ax)
-    colorbar.set_label(r"$\log_{10} |Res|$")
+    fig, axes = plt.subplots(1, 2, figsize = (15, 6), sharey = True)
+
+    h0 = axes[0].pcolormesh(X, W, log_ode, shading = 'auto', cmap = 'autumn')
+    h1 = axes[1].pcolormesh(X, W, log_flux, shading = 'auto', cmap = 'autumn')
+
+    fig.colorbar(h0, ax = axes[0]).set_label(r"$\log_{10}|Res_{ODE}|$")
+    fig.colorbar(h1, ax = axes[1]).set_label(r"$\log_{10}|J|$")
 
     if rar_x is not None and rar_omega is not None and rar_x.numel() > 0:
         rar_x_np = rar_x.detach().cpu().numpy().flatten()
         rar_omega_np = rar_omega.detach().cpu().numpy().flatten()
 
-        ax.scatter(rar_x_np, rar_omega_np, s = 10, facecolors = "none", edgecolors = "black", linewidths = 0.5, alpha = 0.7, label = "Retained RAR points", zorder = 3)
-        ax.legend(loc = "best")
+        for ax in axes:
+            ax.scatter(rar_x_np, rar_omega_np, s = 10, facecolors = "none", edgecolors = "black", linewidths = 0.5, alpha = 0.7, label = "Retained RAR points", zorder = 3)
+            ax.legend(loc = "best")
 
-    ax.set_xlabel(r"$x$", fontsize = 16)
-    ax.set_ylabel(r"$\omega$", fontsize = 16)
-    ax.set_title(rf"ODE Residual over $(x, \omega)$ Domain"
+    axes[0].set_title("ODE residual magnitude")
+    axes[1].set_title("Flux residual magnitude")
+
+    for ax in axes:
+        ax.set_xlabel(r"$x$", fontsize = 16)
+        ax.set_xlim(x_axis[0], x_axis[-1])
+        ax.set_ylim(omega_min, omega_max)
+
+    axes[0].set_ylabel(r"$\omega$")
+
+    fig.suptitle(rf"Residuals over $(x, \omega)$ Domain"
                 "\n"
-                rf"$l = {mode}$, epoch {epoch + 1}")
-    ax.set_xlim(x_axis[0], x_axis[-1])
-    ax.set_ylim(omega_min, omega_max)
+                f"l = {mode}, Epoch = {epoch}")
 
     fig.tight_layout()
 
-    png_path = os.path.join(rar_dir, f"residual_heatmap_epoch_{epoch + 1}.png")
+    png_path = os.path.join(rar_dir, f"residual_heatmap_epoch_{epoch}.png")
     fig.savefig(png_path, dpi = 200, bbox_inches = "tight")
 
-    npz_path = os.path.join(rar_dir, f"residual_heatmap_epoch_{epoch + 1}.npz")
+    npz_path = os.path.join(rar_dir, f"residual_heatmap_epoch_{epoch}.npz")
 
     rar_x_save = rar_x.detach().cpu().numpy().flatten() if rar_x is not None else np.empty(0)
     rar_omega_save = rar_omega.detach().cpu().numpy().flatten() if rar_omega is not None else np.empty(0)
 
-    np.savez_compressed(npz_path, x = x_axis, omega = omega_axis, residual_magnitude = residual_magnitude, log10_residual = log_residual, rar_x = rar_x_save, rar_omega = rar_omega_save)
+    np.savez_compressed(npz_path, x = x_axis, omega = omega_axis, residual_magnitude = ode_magnitude, log10_residual = log_ode, flux_residual = flux_grid, log10_flux_residual = log_flux, 
+                        rar_x = rar_x_save, rar_omega = rar_omega_save)
 
     print(f"Saved RAR residual heatmap: {png_path}", flush = True)
 
@@ -827,6 +887,8 @@ RAR_CANDIDATES = 5000
 RAR_ADD = 250
 RAR_MAX = 2000
 RAR_MIN_JOINT_DISTANCE = 0.01
+RAR_RESTART_AFTER = 5000
+rar_full_epoch = None
 RAR_HEATMAP_INTERVAL = 5000
 RAR_HEATMAP_NX = 120
 RAR_HEATMAP_NOMEGA = 120
@@ -891,35 +953,52 @@ for epoch in range(adam_iterations):
 
 #Residual-based adapative refinement using the complex ODE residual
 
-    if (epoch + 1) % RAR_INTERVAL == 0 and (epoch + 1) < adam_iterations and rar_x.shape[0] < RAR_MAX:
-            print("-"*60)
+    current_epoch = epoch + 1
 
-            print(f"Joint RAR triggered at Adam epoch {epoch + 1}...", flush  = True)
+    rar_restart_now = rar_full_epoch is not None and current_epoch < adam_iterations and current_epoch - rar_full_epoch >= RAR_RESTART_AFTER
 
-            n_add = min(RAR_ADD, RAR_MAX - rar_x.shape[0])
+    if rar_restart_now:
+        
+        print(f"RAR set filled at epoch {rar_full_epoch}. Restarting at epoch {current_epoch}.")
+        
+        rar_x = t.empty((0, 1), dtype = DTYPE, device = device)
+        rar_omega = t.empty((0, 1), dtype = DTYPE, device = device)
+        rar_full_epoch = None
 
-            new_rar_x, new_rar_omega, new_rar_scores = select_rar_joint_points(model = model, n_candidates = RAR_CANDIDATES, n_add = n_add, x_max = x_max, mass = mass,
-                                mode = mode, device = device, dtype = DTYPE, existing_rar_x = rar_x, existing_rar_omega = rar_omega, min_joint_distance = RAR_MIN_JOINT_DISTANCE)
+    should_refine = (current_epoch % RAR_INTERVAL == 0 or rar_restart_now) and current_epoch < adam_iterations and rar_x.shape[0] < RAR_MAX
 
-            actual_added = new_rar_x.shape[0]
+    if should_refine:
+        print("-"*60)
+        print(f"Joint RAR triggered at Adam epoch {epoch + 1}...", flush  = True)
 
-            if actual_added > 0:
-                rar_x = t.cat([rar_x, new_rar_x], dim = 0)
-                rar_omega = t.cat([rar_omega, new_rar_omega], dim = 0)
+        n_add = min(RAR_ADD, RAR_MAX - rar_x.shape[0])
 
-                print(f"Added {actual_added} joint RAR points. Total retained = {rar_x.shape[0]}", flush = True)
-                print(f"RAR x range = [{new_rar_x.min().item():.6f}, {new_rar_x.min().item():.6f}]", flush = True)
-                print(f"RAR omega range = [{new_rar_omega.min().item():.6f}, {new_rar_omega.max().item():.6f}]", flush = True)
+        new_rar_x, new_rar_omega, new_rar_scores = select_rar_joint_points(model = model, n_candidates = RAR_CANDIDATES, n_add = n_add, x_max = x_max, mass = mass,
+                        mode = mode, device = device, dtype = DTYPE, existing_rar_x = rar_x, existing_rar_omega = rar_omega, min_joint_distance = RAR_MIN_JOINT_DISTANCE)
 
-                print(f"Maximum selected ODE residual = {new_rar_scores.max().item():.4e}", flush = True)
+        actual_added = new_rar_x.shape[0]
 
-            else:
-                print("No additional RAR points met the separation constraint.")
+        if actual_added > 0:
+            rar_x = t.cat([rar_x, new_rar_x], dim = 0)
+            rar_omega = t.cat([rar_omega, new_rar_omega], dim = 0)
 
-            print("-"*60)
+            print(f"Added {actual_added} joint RAR points. Total retained = {rar_x.shape[0]}", flush = True)
+            print(f"RAR x range = [{new_rar_x.min().item():.6f}, {new_rar_x.max().item():.6f}]", flush = True)
+            print(f"RAR omega range = [{new_rar_omega.min().item():.6f}, {new_rar_omega.max().item():.6f}]", flush = True)
+
+            print(f"Maximum selected ODE residual = {new_rar_scores.max().item():.4e}", flush = True)
+
+        else:
+            print("No additional RAR points met the separation constraint.")
+
+        if rar_x.shape[0] >= RAR_MAX and rar_full_epoch is None:
+            rar_full_epoch = current_epoch
+            print(f"RAR set is full. Next restart at Adam epoch {rar_full_epoch + RAR_RESTART_AFTER}.", flush = True)
+
+        print("-"*60)
 
     if (epoch + 1) % RAR_HEATMAP_INTERVAL == 0:
-        plot_joint_residual_heatmap(model = model, epoch = epoch, mass = mass, mode = mode, x_max = x_max, rar_x = rar_x, rar_omega = rar_omega,
+        plot_joint_residual_heatmap(model = model, epoch = epoch + 1, mass = mass, mode = mode, x_max = x_max, rar_x = rar_x, rar_omega = rar_omega,
                                 nx = RAR_HEATMAP_NX, n_omega = RAR_HEATMAP_NOMEGA, chunk_size = 2000)
 
 print("Adam training complete. Switching to L-BFGS:", flush = True)
@@ -1142,7 +1221,7 @@ with open(result_file_path, 'w') as f:
 
     f.write(f"omega_min = {omega_min:.10f}\n")
     f.write(f"omega_max = {omega_max:.10f}\n")
-    f.write("training_omega_sampling = uniform_random_per_collocation\n")
+    f.write("training_omega_sampling = 60% uniform + 40% skewed beta distribution \n")
     f.write(f"Adam_iterations = {adam_iterations}\n")
     f.write(f"Adam_base_points_per_epoch = {N_points}\n")
     f.write(f"rar_points_final = {rar_x.shape[0]}\n")
@@ -1177,14 +1256,15 @@ checkpoint = {'model_state_dict': model.state_dict(),
             'model_architecture': {'in_channels': 2, 'out_channels': 4, 'hidden_channels': 32, 'hidden_layers': 3},
             'activation_config': {'type': 'keerie_adaptive_tanh', 'n': 10.0},
             'omega_input_scaling': {'omega_min': omega_min, 'omega_max': omega_max},
-            'rar_config': {'interval': RAR_INTERVAL, 'candidates': RAR_CANDIDATES, 'add_per_refinement': RAR_ADD, 'max_points': RAR_MAX, 'min_joint_distance': RAR_MIN_JOINT_DISTANCE},
+            'rar_config': {'interval': RAR_INTERVAL, 'candidates': RAR_CANDIDATES, 'add_per_refinement': RAR_ADD, 'max_points': RAR_MAX, 'min_joint_distance': RAR_MIN_JOINT_DISTANCE,
+                        "restart_after": RAR_RESTART_AFTER},
             'ansatz_config': {'nn_output_scale': 1.0, 'x_power': 3, 'x_safe_min': 1e-12, 'x_safe_max': 1 - 1e-3},
             'mass': mass,
             'mode': mode,
             'x_max': x_max,
 
             'omega_range': {'min': omega_min, 'max': omega_max},
-            'training_omega_sampling': 'uniform_random_per_collocation_point',
+            'training_omega_sampling': "60%% uniform + 40%% skewed beta distribution",
             'adam_base_points_per_epoch': N_points,
             'query_steps': args.query_steps,
             'diagnostic_omegas': diagnostic_omegas,
