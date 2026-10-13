@@ -735,8 +735,8 @@ def plot_joint_residual_heatmap(model, epoch, mass, mode, x_max, rar_x = None, r
 
     log_residual = np.log10(np.maximum(residual_magnitude, 1e-30))
 
-    fig, ax = plt.subplots(figsize = (10, 6))
-    heatmap = ax.pcolormesh(X, W, log_residual, shading = 'auto', cmap = 'magma')
+    fig, ax = plt.subplots(figsize = (8, 6))
+    heatmap = ax.pcolormesh(X, W, log_residual, shading = 'auto', cmap = 'autumn')
     colorbar = fig.colorbar(heatmap, ax = ax)
     colorbar.set_label(r"$\log_{10} |Res|$")
 
@@ -744,14 +744,14 @@ def plot_joint_residual_heatmap(model, epoch, mass, mode, x_max, rar_x = None, r
         rar_x_np = rar_x.detach().cpu().numpy().flatten()
         rar_omega_np = rar_omega.detach().cpu().numpy().flatten()
 
-        ax.scatter(rar_x_np, rar_omega_np, s = 10, facecolors = "none", edgecolors = "white", linewidths = 0.5, alpha = 0.7, label = "Retained RAR points", zorder = 3)
+        ax.scatter(rar_x_np, rar_omega_np, s = 10, facecolors = "none", edgecolors = "black", linewidths = 0.5, alpha = 0.7, label = "Retained RAR points", zorder = 3)
         ax.legend(loc = "best")
 
     ax.set_xlabel(r"$x$", fontsize = 16)
     ax.set_ylabel(r"$\omega$", fontsize = 16)
     ax.set_title(rf"ODE Residual over $(x, \omega)$ Domain"
                 "\n"
-                rf"$l = {mode}$, Adam epoch {epoch + 1}")
+                rf"$l = {mode}$, epoch {epoch + 1}")
     ax.set_xlim(x_axis[0], x_axis[-1])
     ax.set_ylim(omega_min, omega_max)
 
@@ -924,8 +924,8 @@ for epoch in range(adam_iterations):
 
 print("Adam training complete. Switching to L-BFGS:", flush = True)
 print("="*60)
-lbfgs_optimiser = optim.LBFGS(model.parameters(), lr = 1.0, max_iter = 20,  history_size = 50, line_search_fn = "strong_wolfe")
 
+lbfgs_optimiser = optim.LBFGS(model.parameters(), lr = 1.0, max_iter = 20,  history_size = 50, line_search_fn = "strong_wolfe")
 x_tensor_lbfgs, omega_tensor_lbfgs = sample_joint_batch(n_points = N_points, x_max = x_max, dtype = DTYPE, device = device, rar_x = rar_x, rar_omega = rar_omega)
 
 flux_weight = annealing(adam_iterations - 1, adam_iterations)
@@ -990,8 +990,14 @@ for epoch in range(lbfgs_iterations):
         print("-"*60, flush = True)
 
         diagnostic_model_states.append({'iteration': global_epoch + 1, 'stage': 'L-BFGS', 'state_dict': {key: value.detach().cpu().clone() for key, value in model.state_dict().items()}})
+
+        plot_joint_residual_heatmap(model = model, epoch = global_epoch + 1, mass = mass, mode = mode, x_max = x_max, rar_x = rar_x, rar_omega = rar_omega, 
+                                    nx = RAR_HEATMAP_NX, n_omega = RAR_HEATMAP_NOMEGA, chunk_size = 2000)
+
         for omega_diag in diagnostic_omegas:
             save_training_diagnostics(model, epoch_number = global_epoch + 1, omega = omega_diag)
+
+
 
 print("Conditional PINN training complete.", flush = True)
 
