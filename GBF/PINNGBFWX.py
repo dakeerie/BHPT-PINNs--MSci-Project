@@ -819,6 +819,7 @@ def plot_joint_residual_heatmap(model, epoch, mass, mode, x_max, rar_x = None, r
 
     png_path = os.path.join(rar_dir, f"residual_heatmap_epoch_{epoch}.png")
     fig.savefig(png_path, dpi = 200, bbox_inches = "tight")
+    plt.close(fig)
 
     npz_path = os.path.join(rar_dir, f"residual_heatmap_epoch_{epoch}.npz")
 
@@ -1087,6 +1088,22 @@ dense_query_results = query_gbf(model, mass, mode, omega_query, x_max)
 dense_query_omegas = np.array([result['omega'] for result in dense_query_results])
 dense_query_gbfs = np.array([result['gbf'] for result in dense_query_results])
 query_gbf_path = os.path.join(results_dir, "PINN_query_frequencies.csv")
+query_wronskian = np.array([result["probability"] for result in dense_query_results])
+
+wronskian_error = np.abs(query_wronskian - 1.0)
+
+print(f"Maximum Wronskian-identity error: {np.max(wronskian_error):.6e}", flush = True)
+
+plt.figure(figsize = (7, 5))
+plt.plot(dense_query_omegas, query_wronskian, label = r"$|\alpha|^2 - |\beta|^2$")
+plt.axhlinle(1.0,  linestyle = '--', label = "Target")
+plt.xlabel(r"$\omega$", fontsize = 16)
+plt.ylabel("Wronskian")
+plt.grid()
+plt.legend()
+plt.tight_layout()
+plt.savefig(os.path.join(comparisons_dir, "Wronskian.png"), dpi = 200, format = 'png')
+plt.close()
 
 with open(query_gbf_path, 'w', newline = '') as f:
     writer = csv.writer(f)
@@ -1265,7 +1282,7 @@ checkpoint = {'model_state_dict': model.state_dict(),
             'x_max': x_max,
 
             'omega_range': {'min': omega_min, 'max': omega_max},
-            'training_omega_sampling': "60%% uniform + 40%% skewed beta distribution",
+            'training_omega_sampling': "60% uniform + 40% skewed beta distribution",
             'adam_base_points_per_epoch': N_points,
             'query_steps': args.query_steps,
             'diagnostic_omegas': diagnostic_omegas,
