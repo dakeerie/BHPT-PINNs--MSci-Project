@@ -1096,7 +1096,7 @@ print(f"Maximum Wronskian-identity error: {np.max(wronskian_error):.6e}", flush 
 
 plt.figure(figsize = (7, 5))
 plt.plot(dense_query_omegas, query_wronskian, label = r"$|\alpha|^2 - |\beta|^2$")
-plt.axhlinle(1.0,  linestyle = '--', label = "Target")
+plt.axhline(1.0,  linestyle = '--', label = "Target")
 plt.xlabel(r"$\omega$", fontsize = 16)
 plt.ylabel("Wronskian")
 plt.grid()
