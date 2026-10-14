@@ -198,11 +198,12 @@ def taylor_coeffs(mass, mode, omega):
 
 #Flux loss annealing
 def annealing(epoch, total_epochs):
-    lambda_initial = 10.0
-    lambda_final = 1.0
+    # lambda_initial = 10.0
+    # lambda_final = 1.0
 
-    progress = epoch/(total_epochs - 1)
-    lambda_flux = lambda_final + 0.5*(lambda_initial - lambda_final)*(1 + np.cos(np.pi*progress))
+    # progress = epoch/(total_epochs - 1)
+    # lambda_flux = lambda_final + 0.5*(lambda_initial - lambda_final)*(1 + np.cos(np.pi*progress))
+    lambda_flux = 1.0
     return lambda_flux
 
 #Omega training input helper functions
@@ -787,7 +788,7 @@ def plot_joint_residual_heatmap(model, epoch, mass, mode, x_max, rar_x = None, r
     fig, axes = plt.subplots(1, 2, figsize = (15, 6), sharey = True)
 
     h0 = axes[0].pcolormesh(X, W, log_ode, shading = 'auto', cmap = 'autumn')
-    h1 = axes[1].pcolormesh(X, W, log_flux, shading = 'auto', cmap = 'autumn')
+    h1 = axes[1].pcolormesh(X, W, log_flux, shading = 'auto', cmap = 'summer')
 
     fig.colorbar(h0, ax = axes[0]).set_label(r"$\log_{10}|Res_{ODE}|$")
     fig.colorbar(h1, ax = axes[1]).set_label(r"$\log_{10}|J|$")
