@@ -1024,7 +1024,7 @@ for epoch in range(adam_iterations):
 print("Adam training complete. Switching to L-BFGS:", flush = True)
 print("="*60)
 
-epochs = np.aragne(1, len(hist_grad_norm) + 1)
+epochs = np.arange(1, len(hist_grad_norm) + 1)
 
 fig, ax = plt.subplots(figsize = (8, 5))
 ax.plot(epochs, hist_grad_norm, label = "Gradient Norm History")
