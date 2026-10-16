@@ -867,7 +867,7 @@ loss_history_dir = os.path.join(diagnostic_dir, "loss_history.csv")
 
 with open(loss_history_dir, 'w', newline = '') as f:
     writer = csv.writer(f)
-    writer.writerow(['epoch', 'stage', 'total_loss', 'flux_loss', 'ode_loss', 'ode_real_loss', 'ode_imag_loss', 'flux_weight'])
+    writer.writerow(['epoch', 'stage', 'total_loss', 'flux_loss', 'ode_loss', 'ode_real_loss', 'ode_imag_loss', 'flux_weight', 'grad_norm_preclip', 'gradient_clipped', 'learning_rate_used'])
 
 adam_iterations = args.adam_steps 
 lbfgs_iterations = args.lbfgs_steps
@@ -881,6 +881,7 @@ scheduler = optim.lr_scheduler.LambdaLR(optimiser, lr_lambda = lambda epoch: lr_
 
 
 hist_epochs, hist_total, hist_flux, hist_ode, hist_ode_re, hist_ode_im, hist_weight = [], [], [], [], [], [], []
+hist_grad_norm, hist_clipped = [], []
 diagnostic_model_states = []
 GBF, probability, alphas, betas, extraction_epochs = [], [], [], [], []
 
@@ -899,6 +900,8 @@ RAR_HEATMAP_INTERVAL = 5000
 RAR_HEATMAP_NX = 120
 RAR_HEATMAP_NOMEGA = 120
 
+MAX_GRAD_NORM = 10.0
+
 rar_x = t.empty((0, 1), dtype = DTYPE, device = device)
 rar_omega = t.empty((0, 1), dtype = DTYPE, device = device)
 
@@ -915,14 +918,23 @@ for epoch in range(adam_iterations):
     loss_ode_real, loss_ode_imag, res_ode_re, res_ode_im, P_re, P_im, Q_re, Q_im) = compute_loss(model, x_tensor, mass, mode, omega_tensor, flux_weight)
 
     loss.backward()
-    t.nn.utils.clip_grad_norm_(model.parameters(), 10.0)
+
+    grad_norm = t.nn.utils.clip_grad_norm_(model.parameters(), max_norm = MAX_GRAD_NORM, error_if_nonfinite = True)
+    grad_norm_value = grad_norm.item()
+    gradient_clipped = grad_norm_value > MAX_GRAD_NORM
+    
+    hist_grad_norm.append(grad_norm_value)
+    hist_clipped.append(gradient_clipped)
+
+    learning_rate_used = optimiser.param_groups[0]["lr"]
+
     optimiser.step()
     scheduler.step()
 
     with open(loss_history_dir, 'a', newline = '') as f:
         writer = csv.writer(f)
 
-        writer.writerow([epoch + 1, 'Adam', loss.item(), loss_f.item(), loss_o.item(), loss_ode_real.item(), loss_ode_imag.item(), flux_weight])
+        writer.writerow([epoch + 1, 'Adam', loss.item(), loss_f.item(), loss_o.item(), loss_ode_real.item(), loss_ode_imag.item(), flux_weight, grad_norm_value, int(gradient_clipped), learning_rate_used])
 
     hist_epochs.append(epoch + 1)
     hist_total.append(loss.item())
@@ -1011,6 +1023,36 @@ for epoch in range(adam_iterations):
 
 print("Adam training complete. Switching to L-BFGS:", flush = True)
 print("="*60)
+
+epochs = np.aragne(1, len(hist_grad_norm) + 1)
+
+fig, ax = plt.subplots(figsize = (8, 5))
+ax.plot(epochs, hist_grad_norm, label = "Gradient Norm History")
+ax.axhline(MAX_GRAD_NORM, linestyle = '--', label = 'Clipping threshold')
+ax.set_yscale('log')
+ax.set_xlabel('Adam Epoch', fontsize = 16)
+ax.set_ylabel("Pre-clip Gradient Norm", fontsize = 16)
+ax.grid(True)
+ax.legend()
+fig.tight_layout()
+fig.savefig(os.path.join(diagnostic_dir, "gradient_norm.png"), format = 'png', dpi = 200)
+plt.close(fig)
+
+window = 500
+clipped_array = np.asarray(hist_clipped, dtype = float)
+
+if len(clipped_array) >= window:
+    clip_fraction = np.convolve(clipped_array, np.ones(window)/window, mode = 'valid')
+
+    fig, ax = plt.subplots(figsize = (8, 5))
+    ax.plot(np.arange(window, len(clipped_array) + 1), clip_fraction)
+    ax.set_ylim(0, 1)
+    ax.set_xlabel('Adam Epoch')
+    ax.set_ylabel('Fraction clipped in last 500 epochs')
+    ax.grid(True)
+    fig.tight_layout()
+    fig.savefig(os.path.join(diagnostic_dir, "gradient_clipping_fraction.png"), format = 'png', dpi = 200)
+    plt.close(fig)
 
 lbfgs_optimiser = optim.LBFGS(model.parameters(), lr = 1.0, max_iter = 20,  history_size = 50, line_search_fn = "strong_wolfe")
 x_tensor_lbfgs, omega_tensor_lbfgs = sample_joint_batch(n_points = N_points, x_max = x_max, dtype = DTYPE, device = device, rar_x = rar_x, rar_omega = rar_omega)
