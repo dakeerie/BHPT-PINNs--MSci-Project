@@ -206,6 +206,15 @@ def annealing(epoch, total_epochs):
     lambda_flux = 1.0
     return lambda_flux
 
+def lr_lambda(epoch, decay_start, lr_min, learning_rate):
+    if epoch < decay_start: 
+        return 1.0
+
+    p = (epoch - decay_start)/(max(1, adam_iterations - decay_start - 1))
+    p = min(1.0, max(0.0, p))
+
+    return (lr_min/learning_rate)**p
+
 #Omega training input helper functions
 def scale_omega(omega):
     return 2.0*(omega - omega_min)/(omega_max - omega_min) - 1.0
@@ -860,21 +869,16 @@ with open(loss_history_dir, 'w', newline = '') as f:
     writer = csv.writer(f)
     writer.writerow(['epoch', 'stage', 'total_loss', 'flux_loss', 'ode_loss', 'ode_real_loss', 'ode_imag_loss', 'flux_weight'])
 
-# print("="*60, flush = True)
-# print(f"WS step {step_idx + 1} / {len(omega_schedule)} | l = {mode}, omega = {omega:.4f}", flush = True)
-# print("="*60, flush = True)
-
-learning_rate = 1e-3
-optimiser = optim.Adam(model.parameters(), lr = learning_rate)
-
 adam_iterations = args.adam_steps 
 lbfgs_iterations = args.lbfgs_steps
 
-# if is_first_frequency_of_run:
-#     print("First frequency of this run- using larger training budget.")
-# else:
-#     print("Continuation frequency- using standard training budget.")
-# print("-"*60)
+learning_rate = 1e-3
+lr_min = 1e-6
+decay_start = int(0.3*adam_iterations)
+optimiser = optim.Adam(model.parameters(), lr = learning_rate)
+
+scheduler = optim.lr_scheduler.LambdaLR(optimiser, lr_lambda = lambda epoch: lr_lambda(epoch, decay_start, lr_min, learning_rate))
+
 
 hist_epochs, hist_total, hist_flux, hist_ode, hist_ode_re, hist_ode_im, hist_weight = [], [], [], [], [], [], []
 diagnostic_model_states = []
@@ -911,7 +915,9 @@ for epoch in range(adam_iterations):
     loss_ode_real, loss_ode_imag, res_ode_re, res_ode_im, P_re, P_im, Q_re, Q_im) = compute_loss(model, x_tensor, mass, mode, omega_tensor, flux_weight)
 
     loss.backward()
+    t.nn.utils.clip_grad_norm_(model.parameters(), 10.0)
     optimiser.step()
+    scheduler.step()
 
     with open(loss_history_dir, 'a', newline = '') as f:
         writer = csv.writer(f)
