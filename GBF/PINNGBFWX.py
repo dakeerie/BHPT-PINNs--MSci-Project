@@ -10,6 +10,8 @@ import argparse
 from matplotlib import rc
 import bisect
 import csv
+import json
+from datetime import datetime
 
 plt.rcParams.update({
     "font.family": "serif",
@@ -723,6 +725,15 @@ def serialise_query_results(results):
     return [{'omega': float(result['omega']), 'alpha_re': float(result['alpha'].real), 'alpha_im': float(result['alpha'].imag), 'beta_re': float(result['beta'].real),
             'beta_im': float(result['beta'].imag), 'probability': float(result['probability']), 'gbf': float(result['gbf'])} for result in results]
 
+def atomic_torch_save(obj, path):
+
+    temp_path = path + '.tmp'
+    t.save(obj, temp_path)
+    os.replace(temp_path, path)
+
+def get_cpu_model_state(model):
+    return {name: value.detach().cpu().clone() for name, value in model.state_dict().items()}
+
 def save_comparison_plots(omegas, pinn_gbfs, numerical_gbfs, absolute_differences, relative_differences, title_suffix, prefix):
 
     plt.figure(figsize=[14, 6])
@@ -842,10 +853,17 @@ def plot_joint_residual_heatmap(model, epoch, mass, mode, x_max, rar_x = None, r
 #Setup PINN logistics
 #Seed included for reproducibility
 t.manual_seed(0)
+
+if t.cuda.is_available():
+    t.cuda.manual_seed_all(0)
+
 model = Model(2, 4, 32, num_hidden_layers = 3).to(device = device, dtype = DTYPE)
     
 #Make various directories for saving results
-base_path = f'./GBFWXData/l{mode}'
+run_id = datetime.now().strftime("%Y%m%d_%H%M%S")
+run_name = f"{run_id}_M{mass:g}_x{x_max:g}_w{omega_min:g}-{omega_max:g}_adam{args.adam_steps}_lbfgs{args.lbfgs_steps}"
+
+base_path = os.path.join("./GBFWXData", f"l{mode}", run_name)
 checkpoint_dir = os.path.join(base_path, 'checkpoints')
 diagnostic_dir = os.path.join(base_path, 'diagnostics')
 results_dir = os.path.join(base_path, 'results')
@@ -878,6 +896,9 @@ optimiser = optim.Adam(model.parameters(), lr = learning_rate)
 hist_epochs, hist_total, hist_flux, hist_ode, hist_ode_re, hist_ode_im, hist_weight = [], [], [], [], [], [], []
 hist_grad_norm, hist_clipped = [], []
 diagnostic_model_states = []
+hist_learning_rate = []
+hist_curriculum_stage = []
+hist_omega_lower = []
 GBF, probability, alphas, betas, extraction_epochs = [], [], [], [], []
 
 #Base number of paired (x, omega) samples in each Adam epoch.
@@ -896,6 +917,7 @@ RAR_HEATMAP_NX = 120
 RAR_HEATMAP_NOMEGA = 120
 
 MAX_GRAD_NORM = 10.0
+LBFGS_RESAMPLE_INTERVAL = 200
 
 rar_x = t.empty((0, 1), dtype = DTYPE, device = device)
 rar_omega = t.empty((0, 1), dtype = DTYPE, device = device)
@@ -906,6 +928,26 @@ n_stages = min(6, adam_iterations)
 stage_lows = np.geomspace(omega_low, omega_min, n_stages)
 
 stage_edges = np.linspace(0, adam_iterations, n_stages + 1, dtype = int)
+
+run_config = {"arguments": vars(args),
+    "physical_parameters": {"mass": mass, "mode": mode, "x_extract": x_max, "omega_min": omega_min, "omega_max": omega_max},
+    "reproducibility": {"torch_seed": 0, "dtype": str(DTYPE), "device": str(device)},
+    "model": {"in_channels": 2, "out_channels": 4, "hidden_channels": 32, "hidden_layers": 3, "activation": "keerie_adaptive_tanh", "activation_n": 10.0, "ansatz_x_power": 3},
+    "sampling": {"base_points_per_adam_step": N_points, "x_uniform_fraction": 0.6, "x_beta_alpha": 0.6,
+        "x_beta_beta": 0.1, "omega_uniform_fraction": 0.6, "omega_beta_alpha": 0.6, "omega_beta_beta": 2.0, "omega_scaling": "fixed global logarithmic scaling"},
+    "curriculum": {"n_stages": int(n_stages), "stage_lower_bounds": stage_lows.tolist(), "stage_epoch_edges": stage_edges.tolist(), "initial_lower_bound": float(np.sqrt(omega_min*omega_max))},
+    "adam": {"steps": adam_iterations, "learning_rate_initial": learning_rate, "learning_rate_minimum": lr_min, "learning_rate_schedule": "exponential in log space, restarted per stage", "max_gradient_norm": MAX_GRAD_NORM},
+    "lbfgs": {"outer_steps_requested": lbfgs_iterations, "max_iter": 20, "history_size": 50, "line_search_fn": "strong_wolfe", "resample_interval_outer_steps": LBFGS_RESAMPLE_INTERVAL},
+    "loss": {"flux_weight": 1.0},
+    "rar": {"interval": RAR_INTERVAL, "candidate_count": RAR_CANDIDATES, "points_added_per_refinement": RAR_ADD, "maximum_points": RAR_MAX, "minimum_joint_distance": RAR_MIN_JOINT_DISTANCE, "restart_after": RAR_RESTART_AFTER},
+    "query_steps": args.query_steps,
+    "diagnostic_omegas": diagnostic_omegas}
+
+config_path = os.path.join(base_path, "config.json")
+with open(config_path, "w") as f:
+    json.dump(run_config, f, indent=2)
+
+print(f"Saved run configuration to {config_path}", flush=True)
 
 #Adam loop
 for epoch in range(adam_iterations):
@@ -970,6 +1012,9 @@ for epoch in range(adam_iterations):
     hist_ode.append(loss_o.item())
     hist_ode_re.append(loss_ode_real.item())
     hist_ode_im.append(loss_ode_imag.item())
+    hist_learning_rate.append(float(learning_rate_used))
+    hist_curriculum_stage.append(int(stage))
+    hist_omega_lower.append(float(omega_low))
 
     if (epoch + 1) % 100 == 0 or epoch == 0 or epoch == (adam_iterations - 1):
             extraction_epochs.append(epoch + 1)
@@ -1052,6 +1097,26 @@ for epoch in range(adam_iterations):
 print("Adam training complete. Switching to L-BFGS:", flush = True)
 print("="*60)
 
+adam_checkpoint_path = os.path.join(checkpoint_dir, "after_adam.pth")
+
+atomic_torch_save({
+    "checkpoint_version": 1,
+    "model_state_dict": get_cpu_model_state(model),
+    "config": run_config,
+    "training_status": {"stage_completed": "Adam", "adam_steps_completed": adam_iterations},
+    "training_history": {"epochs": [int(v) for v in hist_epochs],
+        "total_loss": [float(v) for v in hist_total],
+        "ode_loss": [float(v) for v in hist_ode],
+        "flux_loss": [float(v) for v in hist_flux],
+        "learning_rate": hist_learning_rate,
+        "curriculum_stage": hist_curriculum_stage,
+        "omega_lower": hist_omega_lower,
+        "grad_norm_preclip": hist_grad_norm,
+        "gradient_clipped": [bool(v) for v in hist_clipped]},
+    "rar_points": {"x": rar_x.detach().cpu(), "omega": rar_omega.detach().cpu()}}, adam_checkpoint_path)
+
+print(f"Saved post-Adam checkpoint to {adam_checkpoint_path}", flush=True)
+
 epochs = np.arange(1, len(hist_grad_norm) + 1)
 
 fig, ax = plt.subplots(figsize = (8, 5))
@@ -1082,16 +1147,23 @@ if len(clipped_array) >= window:
     fig.savefig(os.path.join(diagnostic_dir, "gradient_clipping_fraction.png"), format = 'png', dpi = 200)
     plt.close(fig)
 
-lbfgs_optimiser = optim.LBFGS(model.parameters(), lr = 1.0, max_iter = 20,  history_size = 50, line_search_fn = "strong_wolfe")
-x_tensor_lbfgs, omega_tensor_lbfgs = sample_joint_batch(n_points = N_points, x_max = x_max, dtype = DTYPE, device = device, rar_x = rar_x, rar_omega = rar_omega)
-
+lbfgs_steps_completed = 0
 flux_weight = annealing(adam_iterations - 1, adam_iterations)
 
 lbfgs_success = True
+x_tensor_lbfgs, omega_tensor_lbfgs = sample_joint_batch(n_points = N_points, x_max = x_max, dtype = DTYPE, device = device, rar_x = rar_x, rar_omega = rar_omega, omega_lower = omega_min)
+lbfgs_optimiser = optim.LBFGS(model.parameters(), lr = 1.0, max_iter = 20, history_size = 50, line_search_fn = "strong_wolfe")
 
 for epoch in range(lbfgs_iterations):
     info = {'total': 0, 'flux': 0, 'ode': 0, 'loss_re': 0, 'loss_im': 0, 'res_re': 0, 'res_im': 0}
 
+    if epoch > 0 and epoch % LBFGS_RESAMPLE_INTERVAL == 0:
+
+        x_tensor_lbfgs, omega_tensor_lbfgs = sample_joint_batch(n_points = N_points, x_max = x_max, dtype = DTYPE, device = device, rar_x = rar_x, rar_omega = rar_omega, omega_lower = omega_min)
+        lbfgs_optimiser = optim.LBFGS(model.parameters(), lr = 1.0, max_iter = 20, history_size = 50, line_search_fn = "strong_wolfe")
+
+        print(f"Refreshed L-BFGS batch  and restarted optimiser history at outer step {epoch}.", flush = True)
+    
     def closure():
         lbfgs_optimiser.zero_grad(set_to_none = True)
         (Re_u_nn, Im_u_nn, flux_res, loss, loss_f, loss_o, loss_ode_re, loss_ode_im,
@@ -1120,12 +1192,14 @@ for epoch in range(lbfgs_iterations):
 
     with open(loss_history_dir, 'a', newline = '') as f:
         writer = csv.writer(f)
-        writer.writerow([(global_epoch + 1), 'L-BFGS', loss_now.item(), lf_now.item(), lo_now.item(), lre.item(), lim.item(), flux_weight])
+        writer.writerow([global_epoch + 1, "L-BFGS", loss_now.item(), lf_now.item(), lo_now.item(), lre.item(), lim.item(), flux_weight,"", "", ""])
 
     if not np.isfinite(info['total']):
         print(f"L-BFGS diverged at epoch {epoch}; stopping.", flush=True)
         lbfgs_success = False
         break
+
+    lbfgs_steps_completed = epoch + 1
 
     if (epoch + 1) % 40 == 0 or epoch == (lbfgs_iterations - 1):
         #Printing and plotting
@@ -1155,9 +1229,40 @@ for epoch in range(lbfgs_iterations):
             save_training_diagnostics(model, epoch_number = global_epoch + 1, omega = omega_diag)
 
 
+checkpoint_path = os.path.join(checkpoint_dir, "trained_model.pth")
+
+final_model_checkpoint = {
+    "checkpoint_version": 1, 
+    "model_state_dict": get_cpu_model_state(model), 
+    "model_architecture": run_config["model"], 
+    "config": run_config,
+    "training_status": {"adam_steps_requested": adam_iterations,
+        "adam_steps_completed": len([e for e in hist_epochs if e <= adam_iterations]),
+        "lbfgs_steps_requested": lbfgs_iterations,
+        "lbfgs_steps_completed": lbfgs_steps_completed,
+        "lbfgs_finite_loss": bool(lbfgs_success),
+        "last_recorded_loss": float(hist_total[-1])},
+    "training_history": {"epochs": [int(v) for v in hist_epochs],
+        "total_loss": [float(v) for v in hist_total],
+        "ode_loss": [float(v) for v in hist_ode],
+        "flux_loss": [float(v) for v in hist_flux],
+        "ode_real_loss": [float(v) for v in hist_ode_re],
+        "ode_imag_loss": [float(v) for v in hist_ode_im],
+        "flux_weight": [float(v) for v in hist_weight]},
+    "rar_points": {"x": rar_x.detach().cpu(),
+        "omega": rar_omega.detach().cpu()},
+        "adam_learning_rate": hist_learning_rate,
+        "adam_curriculum_stage": hist_curriculum_stage,
+        "adam_omega_lower": hist_omega_lower,
+        "adam_grad_norm_preclip": hist_grad_norm,
+        "adam_gradient_clipped": [bool(v) for v in hist_clipped],
+
+    "diagnostic_model_states": diagnostic_model_states}
+
+atomic_torch_save(final_model_checkpoint, checkpoint_path)
+print(f"Saved trained model checkpoint to {checkpoint_path}", flush=True)
 
 print("Conditional PINN training complete.", flush = True)
-
 
 omega_query = np.linspace(omega_min, omega_max, args.query_steps)
 dense_query_results = query_gbf(model, mass, mode, omega_query, x_max)
@@ -1199,7 +1304,7 @@ plt.title(f"Two-input PINN GBF, l = {mode}", fontsize = 16)
 plt.grid()
 plt.legend()
 plt.tight_layout()
-plt.savefig(f"./GBFWXData/l{mode}/WXPINN_GBF.png", format = 'png')
+plt.savefig(os.path.join(comparisons_dir, "WXPINN_GBF.png"), format = 'png')
 plt.close()
 
 print("Preparing final post-training diagnostics...")
@@ -1368,7 +1473,7 @@ checkpoint = {'model_state_dict': model.state_dict(),
             'adam_iterations': adam_iterations,
             'lbfgs_iterations': lbfgs_iterations,
 
-            'flux_weight_initial': 10.0,
+            'flux_weight_initial': 1.0,
             'flux_weight_final': 1.0,
 
             'rar_points': {'x': rar_x.detach().cpu(), 'omega': rar_omega.detach().cpu()},
@@ -1392,8 +1497,18 @@ checkpoint = {'model_state_dict': model.state_dict(),
             'lbfgs_success': bool(lbfgs_success),
             'training_complete': bool(lbfgs_success)}
 
-checkpoint_path = os.path.join(checkpoint_dir, f'pinn_conditional_GBFWX_l{mode}.pth')
+checkpoint["model_state_dict"] = get_cpu_model_state(model)
 
-t.save(checkpoint, checkpoint_path)
+checkpoint["config"] = run_config
+checkpoint["training_history"].update({
+    "adam_learning_rate": hist_learning_rate,
+    "adam_curriculum_stage": hist_curriculum_stage,
+    "adam_omega_lower": hist_omega_lower,
+    "adam_grad_norm_preclip": hist_grad_norm,
+    "adam_gradient_clipped": [bool(v) for v in hist_clipped],
+})
+
+checkpoint_path = os.path.join(base_path, f'pinn_conditional_GBFWX_l{mode}.pth')
+atomic_torch_save(checkpoint, checkpoint_path)
 
 print(f"Checkpoint saved to {checkpoint_path}", flush = True)
