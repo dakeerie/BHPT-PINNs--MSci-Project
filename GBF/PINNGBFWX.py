@@ -206,18 +206,9 @@ def annealing(epoch, total_epochs):
     lambda_flux = 1.0
     return lambda_flux
 
-def lr_lambda(epoch, decay_start, lr_min, learning_rate):
-    if epoch < decay_start: 
-        return 1.0
-
-    p = (epoch - decay_start)/(max(1, adam_iterations - decay_start - 1))
-    p = min(1.0, max(0.0, p))
-
-    return (lr_min/learning_rate)**p
-
 #Omega training input helper functions
 def scale_omega(omega):
-    return 2.0*(omega - omega_min)/(omega_max - omega_min) - 1.0
+    return 2*(t.log(omega) - np.log(omega_min))/(np.log(omega_max) - np.log(omega_min)) - 1
 
 def prepare_omega_tensor(omega, reference_tensor):
 
@@ -253,25 +244,28 @@ def sample_x_points(n_points, x_max, dtype, device):
 
     return t.cat([x_uniform, x_edges], dim = 0)
 
-def sample_omega_points(n_points, dtype, device):
+def sample_omega_points(n_points, omega_lower, dtype, device):
     n_uniform = int(0.6 * n_points)
     n_beta = n_points - n_uniform
 
-    omega_uniform = omega_min + (omega_max - omega_min)*t.rand((n_uniform, 1), dtype=dtype, device=device)
+    omega_uniform = omega_lower + (omega_max - omega_lower)*t.rand((n_uniform, 1), dtype=dtype, device=device)
 
     beta_samples = omega_beta_dist.sample((n_beta,)).reshape(-1, 1)
-    omega_beta = omega_min + (omega_max - omega_min)*beta_samples
+    omega_beta = omega_lower + (omega_max - omega_lower)*beta_samples
 
     omega_samples = t.cat([omega_uniform, omega_beta], dim=0)
 
     permutation = t.randperm(n_points, device=device)
     return omega_samples[permutation]
 
-def sample_joint_batch(n_points, x_max, dtype, device, rar_x = None, rar_omega = None):
+def sample_joint_batch(n_points, x_max, dtype, device, rar_x = None, rar_omega = None, omega_lower = None):
+
+    if omega_lower is None:
+        omega_lower = omega_min
 
     x_base = sample_x_points(n_points = n_points, x_max = x_max, dtype = dtype, device = device)
 
-    omega_base = sample_omega_points(n_points = n_points, dtype = dtype, device = device)
+    omega_base = sample_omega_points(n_points = n_points, omega_lower = omega_lower, dtype = dtype, device = device)
 
     if rar_x is not None and rar_omega is not None and rar_x.numel() > 0:
         x_tensor = t.cat([x_base, rar_x.to(device = device, dtype = dtype)], dim = 0)
@@ -347,7 +341,10 @@ def residual_fields(model, x_tensor, mass, mode, omega, chunk_size = 2000):
 
     return t.cat(ode_squared_chunks, dim = 0), t.cat(flux_chunks, dim = 0)
 
-def select_rar_joint_points(model, n_candidates, n_add, x_max, mass, mode, device, dtype, existing_rar_x = None, existing_rar_omega = None, min_joint_distance = 0.01):
+def select_rar_joint_points(model, n_candidates, n_add, x_max, mass, mode, device, dtype, existing_rar_x = None, existing_rar_omega = None, min_joint_distance = 0.01, omega_lower = None):
+
+    if omega_lower is None:
+        omega_lower = omega_min
 
     empty = t.empty((0, 1), dtype = dtype, device = device)
 
@@ -356,20 +353,21 @@ def select_rar_joint_points(model, n_candidates, n_add, x_max, mass, mode, devic
 
     x_candidates = sample_x_points(n_candidates, x_max, dtype = dtype, device = device)
 
-    omega_candidates = omega_min + (omega_max - omega_min)*t.rand((n_candidates, 1), dtype = dtype, device = device)
+    omega_candidates = omega_lower + (omega_max - omega_lower)*t.rand((n_candidates, 1), dtype = dtype, device = device)
 
     scores = ode_residual_score(model, x_candidates, mass, mode, omega_candidates)
 
     candidate_x_np = x_candidates.flatten().detach().cpu().numpy()
     candidate_omega_np = omega_candidates.flatten().detach().cpu().numpy()
 
-    candidate_points = np.column_stack((candidate_x_np/x_max, (candidate_omega_np - omega_min)/(omega_max - omega_min)))
+    log_omega_span = np.log(omega_max) - np.log(omega_min)
+    candidate_points = np.column_stack((candidate_x_np/x_max, (np.log(candidate_omega_np) - np.log(omega_min))/log_omega_span))
 
     if existing_rar_x is not None and existing_rar_omega is not None and existing_rar_x.numel() > 0:
         old_x = existing_rar_x.flatten().detach().cpu().numpy()
         old_omega = existing_rar_omega.flatten().detach().cpu().numpy()
 
-        occupied_points = np.column_stack((old_x/x_max, (old_omega - omega_min)/(omega_max - omega_min)))
+        occupied_points = np.column_stack((old_x/x_max, (np.log(old_omega) - np.log(omega_min))/log_omega_span))
 
     else:
         occupied_points = np.empty((0, 2), dtype = float)
@@ -877,9 +875,6 @@ lr_min = 1e-6
 decay_start = int(0.3*adam_iterations)
 optimiser = optim.Adam(model.parameters(), lr = learning_rate)
 
-scheduler = optim.lr_scheduler.LambdaLR(optimiser, lr_lambda = lambda epoch: lr_lambda(epoch, decay_start, lr_min, learning_rate))
-
-
 hist_epochs, hist_total, hist_flux, hist_ode, hist_ode_re, hist_ode_im, hist_weight = [], [], [], [], [], [], []
 hist_grad_norm, hist_clipped = [], []
 diagnostic_model_states = []
@@ -905,10 +900,44 @@ MAX_GRAD_NORM = 10.0
 rar_x = t.empty((0, 1), dtype = DTYPE, device = device)
 rar_omega = t.empty((0, 1), dtype = DTYPE, device = device)
 
+omega_low = float(np.sqrt(omega_min*omega_max))
+omega_prev = omega_low
+n_stages = min(6, adam_iterations)
+stage_lows = np.geomspace(omega_low, omega_min, n_stages)
+
+stage_edges = np.linspace(0, adam_iterations, n_stages + 1, dtype = int)
+
 #Adam loop
 for epoch in range(adam_iterations):
 
-    x_tensor, omega_tensor = sample_joint_batch(n_points = N_points, x_max = x_max, dtype = DTYPE, device = device, rar_x = rar_x, rar_omega = rar_omega)
+    stage = min(int(np.searchsorted(stage_edges[1:], epoch, side = "right")), n_stages - 1)
+    stage_start = int(stage_edges[stage])
+    stage_end = int(stage_edges[stage + 1])
+
+    if epoch == stage_start:
+        omega_low = float(stage_lows[stage])
+
+        rar_x = t.empty((0, 1), dtype = DTYPE, device = device)
+        rar_omega = t.empty((0, 1), dtype = DTYPE, device = device)
+        rar_full_epoch = None
+
+        print(f"Stage {stage + 1}/{n_stages}: omega range [{omega_low:.6f}, {omega_max:.6f}]", flush = True)
+
+        new_rar_x, new_rar_omega, new_rar_scores = select_rar_joint_points(model = model, n_candidates = RAR_CANDIDATES, n_add = min(RAR_ADD, RAR_MAX), x_max = x_max, mass = mass, mode = mode, device = device, dtype = DTYPE, existing_rar_x = rar_x,
+                    existing_rar_omega = rar_omega, min_joint_distance = RAR_MIN_JOINT_DISTANCE, omega_lower = omega_low)
+
+        rar_x = t.cat([rar_x, new_rar_x], dim = 0)
+        rar_omega  = t.cat([rar_omega, new_rar_omega], dim = 0)
+
+    stage_progress = (epoch - stage_start)/max(1, stage_end - stage_start - 1)
+    stage_progress = float(np.clip(stage_progress, 0.0, 1.0))
+
+    learning_rate_used = learning_rate*(lr_min/learning_rate)**stage_progress
+
+    for group in optimiser.param_groups:
+        group["lr"] = learning_rate_used
+
+    x_tensor, omega_tensor = sample_joint_batch(n_points = N_points, x_max = x_max, dtype = DTYPE, device = device, rar_x = rar_x, rar_omega = rar_omega, omega_lower = omega_low)
 
     optimiser.zero_grad(set_to_none = True)
 
@@ -929,7 +958,6 @@ for epoch in range(adam_iterations):
     learning_rate_used = optimiser.param_groups[0]["lr"]
 
     optimiser.step()
-    scheduler.step()
 
     with open(loss_history_dir, 'a', newline = '') as f:
         writer = csv.writer(f)
@@ -994,7 +1022,7 @@ for epoch in range(adam_iterations):
         n_add = min(RAR_ADD, RAR_MAX - rar_x.shape[0])
 
         new_rar_x, new_rar_omega, new_rar_scores = select_rar_joint_points(model = model, n_candidates = RAR_CANDIDATES, n_add = n_add, x_max = x_max, mass = mass,
-                        mode = mode, device = device, dtype = DTYPE, existing_rar_x = rar_x, existing_rar_omega = rar_omega, min_joint_distance = RAR_MIN_JOINT_DISTANCE)
+                        mode = mode, device = device, dtype = DTYPE, existing_rar_x = rar_x, existing_rar_omega = rar_omega, min_joint_distance = RAR_MIN_JOINT_DISTANCE, omega_lower = omega_low)
 
         actual_added = new_rar_x.shape[0]
 
