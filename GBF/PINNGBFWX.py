@@ -31,7 +31,8 @@ parser.add_argument('--omega_final', type = float, default = 0.03, help = 'Lower
 parser.add_argument('--query_steps', type = int, default = 200, help = 'Number of frequencies used for post-training numerical comparison')
 parser.add_argument('--adam_steps', type = int, default = 36000, help = "Number of Adam Epochs")
 parser.add_argument('--lbfgs_steps', type = int, default = 1000, help = 'Number of outer L-BFGS step calls')
-
+parser.add_argument('--curriculum_steps', type = int, default = 10, help = 'Number of steps taken in the frequency curriculum')
+parser.add_argument('--curriculum_start', type = float, default = 0.5, help = 'Fraction of omega_max from which the frequency curriculum starts')
 
 args = parser.parse_args()
 mass = args.mass
@@ -864,7 +865,6 @@ run_id = datetime.now().strftime("%Y%m%d_%H%M%S")
 run_name = f"{run_id}_M{mass:g}_x{x_max:g}_w{omega_min:g}-{omega_max:g}_adam{args.adam_steps}_lbfgs{args.lbfgs_steps}"
 
 base_path = os.path.join("./GBFWXData", f"l{mode}", run_name)
-checkpoint_dir = os.path.join(base_path, 'checkpoints')
 diagnostic_dir = os.path.join(base_path, 'diagnostics')
 results_dir = os.path.join(base_path, 'results')
 comparisons_dir = os.path.join(base_path, 'comparisons')
@@ -872,7 +872,6 @@ final_plots_dir = os.path.join(diagnostic_dir, "final")
 rar_dir = os.path.join(diagnostic_dir, "RAR")
 
 os.makedirs(base_path, exist_ok=True)
-os.makedirs(checkpoint_dir, exist_ok = True)
 os.makedirs(diagnostic_dir, exist_ok = True)
 os.makedirs(results_dir, exist_ok = True)
 os.makedirs(comparisons_dir, exist_ok = True)
@@ -922,9 +921,9 @@ LBFGS_RESAMPLE_INTERVAL = 200
 rar_x = t.empty((0, 1), dtype = DTYPE, device = device)
 rar_omega = t.empty((0, 1), dtype = DTYPE, device = device)
 
-omega_low = float(np.sqrt(omega_min*omega_max))
+omega_low = args.curriculum_start*omega_max
 omega_prev = omega_low
-n_stages = min(6, adam_iterations)
+n_stages = min(args.curriculum_steps, adam_iterations)
 stage_lows = np.geomspace(omega_low, omega_min, n_stages)
 
 stage_edges = np.linspace(0, adam_iterations, n_stages + 1, dtype = int)
@@ -1097,7 +1096,7 @@ for epoch in range(adam_iterations):
 print("Adam training complete. Switching to L-BFGS:", flush = True)
 print("="*60)
 
-adam_checkpoint_path = os.path.join(checkpoint_dir, "after_adam.pth")
+adam_checkpoint_path = os.path.join(base_path, "after_adam.pth")
 
 atomic_torch_save({
     "checkpoint_version": 1,
@@ -1229,7 +1228,7 @@ for epoch in range(lbfgs_iterations):
             save_training_diagnostics(model, epoch_number = global_epoch + 1, omega = omega_diag)
 
 
-checkpoint_path = os.path.join(checkpoint_dir, "trained_model.pth")
+checkpoint_path = os.path.join(base_path, "trained_model.pth")
 
 final_model_checkpoint = {
     "checkpoint_version": 1, 
