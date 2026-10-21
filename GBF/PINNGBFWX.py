@@ -12,6 +12,7 @@ import bisect
 import csv
 import json
 from datetime import datetime
+import math
 
 plt.rcParams.update({
     "font.family": "serif",
@@ -33,6 +34,9 @@ parser.add_argument('--adam_steps', type = int, default = 36000, help = "Number 
 parser.add_argument('--lbfgs_steps', type = int, default = 1000, help = 'Number of outer L-BFGS step calls')
 parser.add_argument('--curriculum_steps', type = int, default = 10, help = 'Number of steps taken in the frequency curriculum')
 parser.add_argument('--curriculum_start', type = float, default = 0.5, help = 'Fraction of omega_max from which the frequency curriculum starts')
+parser.add_argument('--lowfreq_weight', type = float, default = 1e-3, help = 'Weight of the asymptotic low=frequency GBF loss. Set to 0 to disable')
+parser.add_argument('--lowfreq_max_M_omega', type =  float, default = 0.1, help = 'Largest  M*omega for which the asymptotic GBF loss will be applied')
+parser.add_argument('--lowfreq_points', type = int, default = 64, help = 'Number of fixed log-spaced frequencies for the low-frequency GBF loss')
 
 args = parser.parse_args()
 mass = args.mass
@@ -48,6 +52,9 @@ if mass <= 0:
 if mode < 0:
     raise ValueError("mode must be non-negative.")
 
+if mode < 2:
+    raise ValueError("mode must be >= 2 as this PINN is setup for spin-2 perturbations")
+
 if args.omega_start <= 0 or args.omega_final <= 0:
     raise ValueError("Both frequencies must be positive.")
 
@@ -59,6 +66,15 @@ if args.lbfgs_steps < 1:
 
 if args.query_steps < 1:
     raise ValueError("query_steps must be at least 1.")
+
+if args.lowfreq_weight < 0:
+    raise ValueError("lowfreq_weight must be non-negative.")
+
+if args.lowfreq_max_M_omega <= 0:
+    raise ValueError('lowfreq_max_M_omega must be > 0.')
+
+if args.lowfreq_points < 2:
+    raise ValueError("lowfreq_points must be at least 2.")
 
 if not (1e-6 < x_max <= 1.0 - 1e-3):
     raise ValueError("x_extract must be in (1e-6, 0.999] for the current ansatz clamp.")
@@ -426,6 +442,77 @@ def ansatz(model, x_tensor, mass, mode, omega):
     u_im = c1_im*x_tensor + c2_im*x_tensor**2 + x_tensor**3*(P_im + Q_im*cs + Q_re*sn)
     return u_re, u_im, P_re, P_im, Q_re, Q_im
 
+#Coefficient of low-frequency limit of GBF (in Finnian Gray paper \Gamma \approx C_{l,s} (M\omega)^{2l+2}) with C_{l,2} given by function below 
+def low_frequency_GBF_coeff(mode):
+
+    if mode < 2:
+        raise ValueError("l >= 2 is requierd for spin-2 perturbations")
+    
+    numerator = 2**(2*mode + 2)*math.factorial(mode - 2)*math.factorial(mode)*math.factorial(mode + 2)
+    denominator = math.factorial(2*mode)*math.factorial(2*mode + 1)
+    return(numerator/denominator)**2
+
+def low_frequency_limit_GBF(mass, mode, omega):
+    dimensionless_omega = mass*omega
+    C = low_frequency_GBF_coeff(mode)
+    return C*(dimensionless_omega)**(2*mode + 2)
+
+
+def differentiable_lowfreq_gbf(model, mass, mode,  omega_values, x_extract):
+
+    omega_values =  omega_values.to(device = device, dtype = DTYPE).reshape(-1, 1)
+    x_values = t.full_like(omega_values, float(x_extract), requires_grad = True)
+    u_re, u_im, *_ = ansatz(model, x_values, mass, mode, omega_values)
+    du_re = first_grad(u_re, x_values)
+    du_im = first_grad(u_im, x_values)
+
+    u = t.complex(u_re.squeeze(-1), u_im.squeeze(-1))
+    du = t.complex(du_re.squeeze(-1), du_im.squeeze(-1))
+    om = omega_values.squeeze(-1)
+
+    L = mode*(mode + 1)
+    Omega = 4.0*mass*om
+
+    a1 = -1j*L/Omega
+    a2 = -(3.0 + (2.0 - L)*a1)/(1j*2.0*Omega)
+
+    y = 1.0 - float(x_extract)
+    x = float(x_extract)
+    u1 = 1.0 + a1*y +  a2*y**2
+    du1  = -(a1 + 2.0*a2*y)
+
+    D = 1j*Omega/(y**2*x) + t.conj(du1/u1)
+    alpha = (u - du/D)/(u1 - du1/D)
+    GBF = 1.0/(alpha.real.square() + alpha.imag.square())
+    return GBF.reshape(-1, 1)
+
+lowfreq_omega_max = min(omega_max, args.lowfreq_max_M_omega/mass)
+
+if args.lowfreq_weight > 0 and lowfreq_omega_max > omega_min:
+    lowfreq_omega = t.logspace(math.log10(omega_min), math.log10(lowfreq_omega_max), steps = args.lowfreq_points, dtype = DTYPE, device = device).reshape(-1, 1)
+    lowfreq_gbf_target = low_frequency_limit_GBF(mass, mode, lowfreq_omega)
+    print(f"Low-frequency GBF loss enabled: weight = {args.lowfreq_weight:g}, omega in [{omega_min:6g}, {lowfreq_omega_max}].", flush = True)
+    print(f"M*omega <= {mass*lowfreq_omega_max:6g}, points = {args.lowfreq_points}", flush = True)
+
+else:
+    lowfreq_omega = t.empty((0, 1), dtype = DTYPE, device = device)
+    lowfreq_gbf_target = t.empty((0, 1), dtype = DTYPE, device = device)
+    if args.lowfreq_weight > 0:
+        print("WARNING: Low-frequency GBF loss disabled because the training interval does not overlap the requested M*omega limit.")
+
+def compute_lowfreq_gbf_loss(model, mass, mode):
+
+    if args.lowfreq_weight <= 0 or lowfreq_omega.numel() == 0:
+        return t.zeros((), dtype = DTYPE, device = device)
+
+    gbf_pred = differentiable_lowfreq_gbf(model, mass, mode, lowfreq_omega, x_max)
+
+    tiny = t.finfo(DTYPE).tiny
+    log_pred = t.log(gbf_pred.clamp_min(tiny))
+    log_target = t.log(lowfreq_gbf_target.clamp_min(tiny))
+
+    return t.mean((log_pred - log_target)**2)
+
 #Current loss function composed of ODE residual and Flux conservation requirement
 def compute_loss(model, x_tensor, mass, mode, omega, flux_weight):
 
@@ -451,9 +538,10 @@ def compute_loss(model, x_tensor, mass, mode, omega, flux_weight):
     loss_flux = t.mean(J**2)
 
     #Loss annealing to be included
-    total_loss = loss_ode + flux_weight*loss_flux
+    loss_lowfreq = compute_lowfreq_gbf_loss(model, mass, mode)
+    total_loss = loss_ode + flux_weight*loss_flux + args.lowfreq_weight*loss_lowfreq
 
-    return u_re, u_im, J, total_loss, loss_flux, loss_ode, loss_ode_re, loss_ode_im, res_ode_re, res_ode_im, P_re, P_im, Q_re, Q_im
+    return u_re, u_im, J, total_loss, loss_flux, loss_lowfreq, loss_ode, loss_ode_re, loss_ode_im, res_ode_re, res_ode_im, P_re, P_im, Q_re, Q_im
 
 #Calculates GBF via alpha = (u - u'/D)/(u1 - u1'/D) with D the log derivative of the u2 branch
 #u1 is obtained via an asymptotic expansion and u is the wavefunction the network approximates
@@ -536,7 +624,7 @@ def evaluate_fixed_frequency(model, mass, mode, omega, x_values):
         x_tensor = x_values
         x_tensor.requires_grad_(True)
 
-    u_re, u_im, J, total_loss, loss_flux, loss_ode, loss_ode_re, loss_ode_im, res_ode_re, res_ode_im, P_re, P_im, Q_re, Q_im = compute_loss(model, x_tensor, mass, mode, float(omega), flux_weight = 0.0)
+    u_re, u_im, J, total_loss, loss_flux, loss_lowfreq, loss_ode, loss_ode_re, loss_ode_im, res_ode_re, res_ode_im, P_re, P_im, Q_re, Q_im = compute_loss(model, x_tensor, mass, mode, float(omega), flux_weight = 0.0)
 
     return {'x': x_tensor.detach().cpu().numpy().flatten(), 'u_re': u_re.detach().cpu().numpy().flatten(), 'u_im': u_im.detach().cpu().numpy().flatten(), 'flux': J.detach().cpu().numpy().flatten(),
             'res_re': res_ode_re.detach().cpu().numpy().flatten(), 'res_im': res_ode_im.detach().cpu().numpy().flatten()}
@@ -549,6 +637,7 @@ def save_training_diagnostics(model, epoch_number, omega):
     plt.plot(hist_epochs, hist_flux, label = 'Flux')
     plt.plot(hist_epochs, hist_ode_re, label = 'Real ODE')
     plt.plot(hist_epochs, hist_ode_im, label = 'Imag ODE')
+    plt.plot(hist_epochs, hist_lowfreq, label = 'Low frequency')
     plt.yscale('log')
     plt.xlabel('Epoch', fontsize = 16)
     plt.ylabel('Loss', fontsize = 16)
@@ -781,7 +870,7 @@ def save_comparison_plots(omegas, pinn_gbfs, numerical_gbfs, absolute_difference
     plt.grid()
 
     plt.tight_layout()
-    plt.savefig(os.path.join(comparisons_dir, f'{prefix}_Differences.png'), format='png')
+    plt.savefig(os.path.join(comparisons_dir, f'{prefix}_differences.png'), format='png')
     plt.close()
 
 def plot_joint_residual_heatmap(model, epoch, mass, mode, x_max, rar_x = None, rar_omega = None, nx = 120, n_omega = 120, chunk_size = 2000):
@@ -882,7 +971,7 @@ loss_history_dir = os.path.join(diagnostic_dir, "loss_history.csv")
 
 with open(loss_history_dir, 'w', newline = '') as f:
     writer = csv.writer(f)
-    writer.writerow(['epoch', 'stage', 'total_loss', 'flux_loss', 'ode_loss', 'ode_real_loss', 'ode_imag_loss', 'flux_weight', 'grad_norm_preclip', 'gradient_clipped', 'learning_rate_used'])
+    writer.writerow(['epoch', 'stage', 'total_loss', 'flux_loss', 'low-freq_loss', 'ode_loss', 'ode_real_loss', 'ode_imag_loss', 'flux_weight', 'grad_norm_preclip', 'gradient_clipped', 'learning_rate_used'])
 
 adam_iterations = args.adam_steps 
 lbfgs_iterations = args.lbfgs_steps
@@ -892,7 +981,7 @@ lr_min = 1e-6
 decay_start = int(0.3*adam_iterations)
 optimiser = optim.Adam(model.parameters(), lr = learning_rate)
 
-hist_epochs, hist_total, hist_flux, hist_ode, hist_ode_re, hist_ode_im, hist_weight = [], [], [], [], [], [], []
+hist_epochs, hist_total, hist_flux, hist_lowfreq, hist_ode, hist_ode_re, hist_ode_im, hist_weight = [], [], [], [], [], [], [], []
 hist_grad_norm, hist_clipped = [], []
 diagnostic_model_states = []
 hist_learning_rate = []
@@ -984,7 +1073,7 @@ for epoch in range(adam_iterations):
 
     flux_weight = annealing(epoch, adam_iterations)
     hist_weight.append(flux_weight)
-    (Re_u_nn, Im_u_nn, flux_res, loss, loss_f, loss_o, 
+    (Re_u_nn, Im_u_nn, flux_res, loss, loss_f, loss_lowfreq, loss_o, 
     loss_ode_real, loss_ode_imag, res_ode_re, res_ode_im, P_re, P_im, Q_re, Q_im) = compute_loss(model, x_tensor, mass, mode, omega_tensor, flux_weight)
 
     loss.backward()
@@ -1003,11 +1092,12 @@ for epoch in range(adam_iterations):
     with open(loss_history_dir, 'a', newline = '') as f:
         writer = csv.writer(f)
 
-        writer.writerow([epoch + 1, 'Adam', loss.item(), loss_f.item(), loss_o.item(), loss_ode_real.item(), loss_ode_imag.item(), flux_weight, grad_norm_value, int(gradient_clipped), learning_rate_used])
+        writer.writerow([epoch + 1, 'Adam', loss.item(), loss_f.item(), loss_lowfreq.item(), loss_o.item(), loss_ode_real.item(), loss_ode_imag.item(), flux_weight, grad_norm_value, int(gradient_clipped), learning_rate_used])
 
     hist_epochs.append(epoch + 1)
     hist_total.append(loss.item())
     hist_flux.append(loss_f.item())
+    hist_lowfreq.append(loss_lowfreq.item())
     hist_ode.append(loss_o.item())
     hist_ode_re.append(loss_ode_real.item())
     hist_ode_im.append(loss_ode_imag.item())
@@ -1107,6 +1197,7 @@ atomic_torch_save({
         "total_loss": [float(v) for v in hist_total],
         "ode_loss": [float(v) for v in hist_ode],
         "flux_loss": [float(v) for v in hist_flux],
+        "lowfreq_loss": [float(v) for v in hist_lowfreq],
         "learning_rate": hist_learning_rate,
         "curriculum_stage": hist_curriculum_stage,
         "omega_lower": hist_omega_lower,
@@ -1154,7 +1245,7 @@ x_tensor_lbfgs, omega_tensor_lbfgs = sample_joint_batch(n_points = N_points, x_m
 lbfgs_optimiser = optim.LBFGS(model.parameters(), lr = 1.0, max_iter = 20, history_size = 50, line_search_fn = "strong_wolfe")
 
 for epoch in range(lbfgs_iterations):
-    info = {'total': 0, 'flux': 0, 'ode': 0, 'loss_re': 0, 'loss_im': 0, 'res_re': 0, 'res_im': 0}
+    info = {'total': 0, 'flux': 0, 'low_freq': 0, 'ode': 0, 'loss_re': 0, 'loss_im': 0, 'res_re': 0, 'res_im': 0}
 
     if epoch > 0 and epoch % LBFGS_RESAMPLE_INTERVAL == 0:
 
@@ -1165,25 +1256,26 @@ for epoch in range(lbfgs_iterations):
     
     def closure():
         lbfgs_optimiser.zero_grad(set_to_none = True)
-        (Re_u_nn, Im_u_nn, flux_res, loss, loss_f, loss_o, loss_ode_re, loss_ode_im,
+        (Re_u_nn, Im_u_nn, flux_res,  loss, loss_f, loss_lowfreq, loss_o, loss_ode_re, loss_ode_im,
         res_ode_re, res_ode_im, P_re, P_im, Q_re, Q_im) = compute_loss(model, x_tensor_lbfgs, mass, mode, omega_tensor_lbfgs, flux_weight)
         loss.backward()
 
-        info.update({'total': loss.item(), 'flux': loss_f.item(), 'ode': loss_o.item(), 'loss_re': loss_ode_re.item(), 'loss_im': loss_ode_im.item()})
+        info.update({'total': loss.item(), 'flux': loss_f.item(), 'low_freq': loss_lowfreq.item(), 'ode': loss_o.item(), 'loss_re': loss_ode_re.item(), 'loss_im': loss_ode_im.item()})
 
         return loss
 
     lbfgs_optimiser.step(closure)
 
     with_grad = compute_loss(model, x_tensor_lbfgs, mass, mode, omega_tensor_lbfgs, flux_weight)
-    _, _, _, loss_now, lf_now, lo_now, lre, lim, *_ = with_grad
-    info.update({'total': loss_now.item(), 'flux': lf_now.item(), 'ode': lo_now.item(), 'loss_re': lre.item(), 'loss_im': lim.item()})
+    _, _, _, loss_now, lf_now, llfreq_now, lo_now, lre, lim, *_ = with_grad
+    info.update({'total': loss_now.item(), 'flux': lf_now.item(), 'low_freq': llfreq_now.item(), 'ode': lo_now.item(), 'loss_re': lre.item(), 'loss_im': lim.item()})
 
     global_epoch = adam_iterations + epoch
     
     hist_epochs.append(global_epoch + 1)
     hist_total.append(loss_now.item())
     hist_flux.append(lf_now.item())
+    hist_lowfreq.append(llfreq_now.item())
     hist_ode.append(lo_now.item())
     hist_ode_re.append(lre.item())
     hist_ode_im.append(lim.item())
@@ -1191,7 +1283,7 @@ for epoch in range(lbfgs_iterations):
 
     with open(loss_history_dir, 'a', newline = '') as f:
         writer = csv.writer(f)
-        writer.writerow([global_epoch + 1, "L-BFGS", loss_now.item(), lf_now.item(), lo_now.item(), lre.item(), lim.item(), flux_weight,"", "", ""])
+        writer.writerow([global_epoch + 1, "L-BFGS", loss_now.item(), lf_now.item(), llfreq_now.item(), lo_now.item(), lre.item(), lim.item(), flux_weight,"", "", ""])
 
     if not np.isfinite(info['total']):
         print(f"L-BFGS diverged at epoch {epoch}; stopping.", flush=True)
@@ -1245,6 +1337,7 @@ final_model_checkpoint = {
         "total_loss": [float(v) for v in hist_total],
         "ode_loss": [float(v) for v in hist_ode],
         "flux_loss": [float(v) for v in hist_flux],
+        "lowfreq_loss": [float(v) for v in hist_lowfreq],
         "ode_real_loss": [float(v) for v in hist_ode_re],
         "ode_imag_loss": [float(v) for v in hist_ode_im],
         "flux_weight": [float(v) for v in hist_weight]},
@@ -1303,7 +1396,7 @@ plt.title(f"Two-input PINN GBF, l = {mode}", fontsize = 16)
 plt.grid()
 plt.legend()
 plt.tight_layout()
-plt.savefig(os.path.join(comparisons_dir, "WXPINN_GBF.png"), format = 'png')
+plt.savefig(os.path.join(base_path, "WXPINN_GBF.png"), format = 'png')
 plt.close()
 
 print("Preparing final post-training diagnostics...")
@@ -1404,8 +1497,7 @@ T = 1/final_alpha
 R = final_beta/final_alpha
 
 final_loss_data = compute_loss(model, x_tensor_lbfgs, mass, mode, omega_tensor_lbfgs, flux_weight)
-
-_, _, _, final_total_loss, final_flux_loss, final_ode_loss, _, _, *_ = final_loss_data
+_, _, _, final_total_loss, final_flux_loss, final_lowfreq_loss, final_ode_loss, _, _, *_ = final_loss_data
 
 query_relative_finite = query_relative_differences[np.isfinite(query_relative_differences)]
 
@@ -1430,6 +1522,7 @@ with open(result_file_path, 'w') as f:
     f.write(f"final_total_loss = {final_total_loss.item():.12e}\n")
     f.write(f"final_ODE_loss = {final_ode_loss.item():.12e}\n")
     f.write(f"final_flux_loss = {final_flux_loss.item():.12e}\n")
+    f.write(f"final_low_freq_loss = {final_lowfreq_loss.item():.12e}\n")
 
     f.write(f"monitor_frequency = {monitor_omega:.10f}\n")
     f.write(f"alpha_re = {final_alpha.real:.12e}\n")
