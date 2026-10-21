@@ -450,7 +450,7 @@ def low_frequency_GBF_coeff(mode):
     
     numerator = 2**(2*mode + 2)*math.factorial(mode - 2)*math.factorial(mode)*math.factorial(mode + 2)
     denominator = math.factorial(2*mode)*math.factorial(2*mode + 1)
-    return(numerator/denominator)**2
+    return (numerator/denominator)**2
 
 def low_frequency_limit_GBF(mass, mode, omega):
     dimensionless_omega = mass*omega
@@ -1479,7 +1479,7 @@ save_comparison_plots(query_comparison_omegas, query_pinn_gbfs, query_numerical_
 
 plt.figure(figsize=[7, 5])
 
-plt.plot(query_comparison_omegas, query_numerical_gbfs, 'o-', label='Numerical')
+plt.plot(query_comparison_omegas, query_numerical_gbfs, label='Numerical')
 plt.plot(query_comparison_omegas, query_pinn_gbfs, 'x-', label='Two-input PINN')
 plt.xlabel(r'$\omega$', fontsize = 16)
 plt.ylabel(r'$\Gamma(\omega)$', fontsize = 16)
