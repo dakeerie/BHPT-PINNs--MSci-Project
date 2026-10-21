@@ -8,6 +8,7 @@ import imageio.v2 as imageio
 import os
 import glob
 import argparse
+import math
 
 # import sys
 # from pathlib import Path
@@ -62,7 +63,7 @@ if args.post_processing:
 if args.omega_start < args.omega_final:
     raise ValueError("omega_final must be less than omega_start")
 
-omega_schedule = np.linspace(args.omega_start, args.omega_final, args.num_steps)
+omega_schedule = np.logspace(np.log10(args.omega_start), np.log10(args.omega_final), args.num_steps)
 
 modes = [mode]
 
@@ -135,6 +136,15 @@ def extraction(sol, x_extract, mass, mode, omega):
     GBF = 1.0/np.abs(alpha)**2
 
     return GBF, alpha, beta, flux_check
+
+def low_freq_limit(mass, mode, omega):
+    dimensionless_freq = mass*omega
+
+    numerator = 2**(2*mode + 2)*math.factorial(mode - 2)*math.factorial(mode)*math.factorial(mode + 2)
+    denominator = math.factorial(2*mode)*math.factorial(2*mode + 1)
+    Cl2 = (numerator/denominator)**2
+
+    return Cl2*dimensionless_freq**(2*mode + 2)
 
 print("Initialising solver...")
 
@@ -301,13 +311,15 @@ else:
     plt.figure(figsize = [6,4])
     for l in modes:
         GBF_values = np.array([results[l][om]["GBF"] for om in omega_schedule])
+        lowfreq_asymptotic = low_freq_limit(mass, l, omega_schedule)
         plt.plot(omega_schedule, GBF_values, 'o-', label = f"$l = {int(l)}$", markersize = 4)
+        plt.plot(omega_schedule, lowfreq_asymptotic, label = r"$M \omega << 1$ approximant")
     plt.xlabel(r'$\omega$', fontsize = 18)
     plt.ylabel(r'$\Gamma(\omega)$', fontsize = 18)
     plt.title('Greybody Factor vs Frequency', fontsize = 20)
     plt.legend(loc = 'lower right')
     # plt.ylim(-0.05, 1.05)
-    plt.grid()
+    plt.grid(which = 'both')
     plt.tight_layout()
     plt.savefig(f'{plots_path}/GBF.png', format = 'png')
     plt.close()
@@ -315,7 +327,9 @@ else:
     plt.figure(figsize = [6,4])
     for l in modes:
         GBF_values = np.array([results[l][om]["GBF"] for om in omega_schedule])
+        lowfreq_asymptotic = low_freq_limit(mass, l, omega_schedule)
         plt.plot(omega_schedule, GBF_values, 'o-', label = f"$l = {int(l)}$", markersize = 4)
+        plt.plot(omega_schedule, lowfreq_asymptotic, label = r"$M \omega \ll 1$ approximant")
     # plt.hlines(0.5, color = 'k', linestyle = '--')
     plt.xlabel(r'$\omega$', fontsize = 18)
     plt.ylabel(r'$\Gamma(\omega)$', fontsize = 18)
@@ -323,7 +337,7 @@ else:
     plt.legend(loc = 'lower right')
     plt.yscale('log')
     plt.tight_layout()
-    plt.grid()
+    plt.grid(which = 'both')
     plt.savefig(f'{plots_path}/logGBF.png', format = 'png')
     plt.close()
 
@@ -335,7 +349,7 @@ else:
 
     #For convergence test
     convergence_l = mode
-    convergence_omega = omega_schedule[0]
+    convergence_omega = omega_schedule[-1]
 
     extraction_points = [0.95, 0.97, 0.98, 0.99, 0.995, 0.999, 0.9995, 0.9999]
 
