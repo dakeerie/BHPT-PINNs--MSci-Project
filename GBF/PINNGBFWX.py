@@ -879,36 +879,38 @@ def atomic_torch_save(obj, path):
 def get_cpu_model_state(model):
     return {name: value.detach().cpu().clone() for name, value in model.state_dict().items()}
 
-def save_comparison_plots(omegas, pinn_gbfs, numerical_gbfs, absolute_differences, relative_differences, title_suffix, prefix):
+def save_simulation_comparison_plots(omegas, pinn_gbfs, numerical_gbfs, absolute_differences, relative_differences, title_suffix, prefix, method):
 
     plt.figure(figsize=[14, 6])
 
     plt.subplot(1, 2, 1)
-    plt.plot(omegas, numerical_gbfs, label='Numerical')
+    plt.suptitle('Simulation vs. PINN')
+    plt.plot(omegas, numerical_gbfs, label='Simulation')
     plt.plot(omegas, pinn_gbfs, label='Conditional PINN')
     plt.xlabel(r'$\omega$', fontsize=16)
     plt.ylabel(r'$\Gamma(\omega)$', fontsize=16)
-    plt.title(f'GBF Comparison — {title_suffix}')
+    plt.title(f'GBF Comparison - {title_suffix}')
     plt.grid()
     plt.legend()
 
     plt.subplot(1, 2, 2)
-    plt.plot(omegas, numerical_gbfs, label='Numerical')
+    plt.plot(omegas, numerical_gbfs, label='Simulation')
     plt.plot(omegas, pinn_gbfs, label='Conditional PINN')
     plt.xlabel(r'$\omega$', fontsize=16)
     plt.ylabel(r'$\Gamma(\omega)$', fontsize=16)
     plt.yscale('log')
-    plt.title(f'GBF Comparison — {title_suffix}')
+    plt.title(f'Log-scale GBF Comparison - {title_suffix}')
     plt.grid()
     plt.legend()    
 
     plt.tight_layout()
-    plt.savefig(os.path.join(comparisons_dir, f'{prefix}_GBF.png'), format='png')
+    plt.savefig(os.path.join(comparisons_dir, f'SimvsPINN_GBF.png'), format='png')
     plt.close()
 
     plt.figure(figsize=[14, 6])
 
     plt.subplot(1, 2, 1)
+    plt.suptitle('Simulation vs. PINN')
     plt.plot(omegas, absolute_differences)
     plt.xlabel(r'$\omega$', fontsize=16)
     plt.ylabel('Absolute Difference', fontsize=16)
@@ -925,7 +927,7 @@ def save_comparison_plots(omegas, pinn_gbfs, numerical_gbfs, absolute_difference
     plt.grid()
 
     plt.tight_layout()
-    plt.savefig(os.path.join(comparisons_dir, f'{prefix}_differences.png'), format='png')
+    plt.savefig(os.path.join(comparisons_dir, f'SimvsPINN_differences.png'), format='png')
     plt.close()
 
 def plot_joint_residual_heatmap(model, epoch, mass, mode, x_max, rar_x = None, rar_omega = None, nx = 120, n_omega = 120, chunk_size = 2000):
@@ -1530,7 +1532,7 @@ print(f"Loaded {len(numerical_results)} numerical results.")
 query_comparison_csv = os.path.join(comparisons_dir, "PINN_vs_Numerical_query.csv")
 query_comparison_omegas, query_pinn_gbfs, query_numerical_gbfs, query_absolute_differences, query_relative_differences = compare_pinn_to_numerical(dense_query_results,
                     numerical_results, query_comparison_csv) 
-save_comparison_plots(query_comparison_omegas, query_pinn_gbfs, query_numerical_gbfs, query_absolute_differences, query_relative_differences, "Dense Query Frequencies", "query")
+save_simulation_comparison_plots(query_comparison_omegas, query_pinn_gbfs, query_numerical_gbfs, query_absolute_differences, query_relative_differences, "Dense Query Frequencies", "query")
 
 plt.figure(figsize=[7, 5])
 
@@ -1660,3 +1662,77 @@ atomic_torch_save(checkpoint, checkpoint_path)
 
 print(f"Checkpoint saved to {checkpoint_path}", flush = True)
 
+print("Calculating GBF via product integral approach...")
+print("-"*60)
+
+x_values = np.linspace(mass*omega_min, mass*omega_max, args.query_steps)
+PI_T_list = []
+
+for x in x_values:
+    T, alpha, beta = product_integral_GBF(x, mode = mode, ustar_max = 1000, N = 10000)
+    PI_T_list.append(T)
+    unitarity = np.abs(alpha)**2 - np.abs(beta)**2
+
+PI_T = np.asarray(PI_T_list)
+abs_diff = np.abs(query_pinn_gbfs - PI_T)
+rel_diff = []
+
+for i, T in enumerate(PI_T):
+    if T != 0.0:
+        relative_difference = abs_diff[i]/T
+    else:
+        relative_difference = np.nan
+    rel_diff.append(relative_difference)
+
+rel_diff = np.asarray(rel_diff)
+
+plt.figure(figsize = [14, 6])
+
+plt.subplot(1, 2, 1)
+plt.suptitle('Product Integral vs. PINN')
+plt.plot(x_values/mass, PI_T_list, label = 'Product Integral')
+plt.plot(query_comparison_omegas, query_pinn_gbfs, label = 'Conditional PINN')
+plt.xlabel(r'$\omega$', fontsize = 16)
+plt.ylabel(r'$\Gamma(\omega)$', fontsize = 16)
+plt.title(r'GBF Comparison - Dense Query Frequencies', fontsize = 16)
+plt.grid()
+plt.legend()
+
+plt.subplot(1, 2, 2)
+plt.plot(x_values/mass, PI_T_list, label = 'Product Integral')
+plt.plot(query_comparison_omegas, query_pinn_gbfs, label = 'Conditional PINN')
+plt.yscale('log')
+plt.xlabel(r'$\omega$', fontsize = 16)
+plt.ylabel(r'$\Gamma(\omega)$', fontsize = 16)
+plt.title(r'Log-scale GBF Comparison - Dense Query Frequencies', fontsize = 16)
+plt.grid()
+plt.legend()
+
+plt.tight_layout()
+plt.savefig(os.path.join(comparisons_dir, 'PIvsPINN_GBF.png'), format = 'png', dpi = 200)
+plt.close()
+
+plt.figure(figsize = [14, 6])
+
+plt.subplot(1, 2, 1)
+plt.suptitle('Product Integral vs. PINN')
+plt.plot(query_comparison_omegas, abs_diff)
+plt.yscale('log')
+plt.xlabel(r'$\omega$', fontsize = 16)
+plt.ylabel(r'Absolute Difference', fontsize = 16)
+plt.title(r'Absolute Difference - Dense Query Frequencies', fontsize = 16)
+plt.grid()
+plt.legend()
+
+plt.subplot(1, 2, 2)
+plt.plot(query_comparison_omegas, rel_diff)
+plt.yscale('log')
+plt.xlabel(r'$\omega$', fontsize = 16)
+plt.ylabel(r'Relative Difference', fontsize = 16)
+plt.title(r'Relative Difference - Dense Query Frequencies', fontsize = 16)
+plt.grid()
+plt.legend()
+
+plt.tight_layout()
+plt.savefig(os.path.join(comparisons_dir, 'PIvsPINN_differences.png'), format = 'png', dpi = 200)
+plt.close()
