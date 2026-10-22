@@ -586,57 +586,125 @@ def extraction(model, x_extraction, mass, mode, omega):
 
 def u_from_ustar(ustar):
     """Calculates dimensionless u = r/2M from dimensionless tortoise coordinate u_* = r_*/2M"""
-    arg = np.exp(ustar - 1.0)
-    w = np.real(lambertw(arg))
-    return 1.0 + w
+    ustar_arr = np.asarray(ustar, dtype = float)
+    original_shape = ustar_arr.shape
+    z = (ustar_arr - 1.0).reshape(-1)
+    w = np.empty_like(z)
+
+    direct = z < 500.0
+    if np.any(direct):
+        w[direct] = np.real(lambertw(np.exp(z[direct])))
+
+    large = ~direct
+    if np.any(large):
+        z_large = z[large]
+        w_large = z_large - np.log(z_large) + np.log(z_large)/z_large
+
+        for _ in range(8):
+            residual = w_large + np.log(w_large) - z_large
+            w_large -= residual*w_large/(w_large + 1.0)
+        w[large] = w_large
+
+    return (1.0 + w).reshape(original_shape)
 
 def RW_potential(u, mode):
     #Dimensionless potential- see appendix B of Gray and Visser paper 
     return (1.0 - 1.0/u)*(mode*(mode + 1)/u**2 -3/u**3)
 
+def negative_integrand_values(ustar_nodes, Momega, mode):
+    """Return samples of -A(u*) from eq. (4.13) of Gray & Visser.
+
+    A(u*) = -i V(u*)/(4Momega) [[1, exp(-4iMomegau*)], [-exp(4iMomegau*), -1]].
+
+    Sign is reversed because the Helton-Stuckwisch recursion used in eq. (3.14) has the opposite product-order converntion.
+    Applying this to -A approximates the inverse of the desired transfer matrix (eq. 3.11) containing the Bogoliubov coefficients.
+    """
+    u = u_from_ustar(ustar_nodes)
+    potential = RW_potential(u, mode)
+    coeff = 1j*potential/(4.0*Momega)
+    phase = np.exp(4j*Momega*ustar_nodes)
+
+    A = np.empty((ustar_nodes.size, 2, 2), dtype = np.complex128)
+    A[:, 0, 0] = coeff
+    A[:, 0, 1] = coeff*np.conjugate(phase)
+    A[:, 1, 0] = -coeff*phase
+    A[:, 1, 1] = -coeff
+    return A
+
 def product_integral_GBF(x, mode, ustar_min = -50.0, ustar_max = 350.0, N = 10000):
-    """Calculates the GBF for dimensionless frequency x = M*omega using the path-ordered exponential/product integral approach.
+    """Calculates the GBF for dimensionless frequency x = M*omega using a fifth order path-ordered exponential/product integral approach.
         Parameters: 
             x: float, dimensionless frequency x = M*omega
             mode: int, multipole mode l (>=2 here)
-            ustar_min: float, lower boundary approximating -infinity (event horizon)
-            ustar_max: float, upper boundary approximating +infinity (spatial infinity)
-            N: int, number of integration grid points
+            ustar_min, ustar_max: float, finite approximation of tortoise coordinate limits- paper uses [-50, 350]
+            N: int, number of product-integral subintervals (not grid points). Each interval samples A at five equally spaced nodes as in eq. (3.13)
 
         Returns:
             T: float, transmission probability i.e. GBF
             alpha: complex, Bogoliubov coefficient alpha(x)
             beta: complex, Bogoliubov coefficient beta(x)
+        
+        The Helton-Stuckwisch approximation computes the inverse transfer matrix H = [[alpha*, -beta*], [-beta, alpha]] so alpha = conj(H[0, 0]) and beta = -H[1, 0]
     """
-    ustar_grid = np.linspace(ustar_min, ustar_max, N)
-    h = (ustar_max - ustar_min)/(N - 1)
+    x = float(x)
+    mode = int(mode)
+    N = int(N)
+    ustar_min = float(ustar_min)
+    ustar_max = float(ustar_max)
 
-    u_grid = u_from_ustar(ustar_grid)
-    V_grid = RW_potential(u_grid, mode)
+    if not np.isfinite(x) or x <= 0.0:
+        raise ValueError("x must be finite, positive, dimensionless frequency M*omega")
 
-    #Pre-calculate matrix factors
-    #A(u_*) = -i/(4x)*V(u_*)*[[1, exp(-4ixu_*)], [-exp(4ixu_*), -1]]
-    coefficient = -1j*V_grid/(4.0*x)
-    phase = np.exp(4j*x*ustar_grid)
+    if mode < 2:
+        raise ValueError("mode must be >= 2 for the spin-2 potential used here")
 
-    #Matrix elements for M_k = I + A(u*_k)*h
-    M00 = 1.0 + coefficient*h
-    M01 = coefficient*h*np.conj(phase)
-    M10 = -coefficient*h*phase
-    M11 = 1.0 - coefficient*h
+    if N < 1:
+        raise ValueError("N must be a positive number of subintervals")
 
-    #Evaluate product integral: E = M_{N-1} @ M_{N - 2} @ ... @ M_0
-    E = np.identity(2, dtype = complex)
+    if not (np.isfinite(ustar_min) and np.isfinite(ustar_max) and ustar_max > ustar_min):
+        raise ValueError("Require finite bounds with ustar_max > ustar_min")
+
+    h = (ustar_max - ustar_min)/N
+    #N intervals, with A_j evaluated at u*_{k - 1} + j h/4, j = 0,..., 4
+    #Thus 4*N + 1 nodes and no extra endpoint step.
+    ustar_nodes = ustar_min + (h/4.0)*np.arange(4*N + 1)
+    A_nodes = negative_integrand_values(ustar_nodes, x, mode)
+
+    I = np.eye(2, dtype = np.complex128)
+    H = I.copy() #accumulates the inverse transfer matrix by right multiplication
+
     for k in range(N):
-        Mk = np.array([[M00[k], M01[k]], [M10[k], M11[k]]])
-        E = Mk @ E
+        A0, A1, A2, A3, A4 = A_nodes[4*k:4*k + 5]
 
-    #Extract Bogoliubov coefficients
-    alpha = E[0, 0]
-    beta = E[1, 0]
+        #Helton-Stuckwisch fifth-order product integral recursion (Eq. 3.14)
+        K1 = h*A4
+        K2 = h*(A3 @ (4.0*I + K1))
+        K3 = h*(A2 @ (8.0*(I - K1) + 3.0*K2))
+        K4 = h*(A1 @ (32.0*I + 18.0*K1 + 3.0*h*(A2 @ (6.0*I - K1 + K2)) - 3.0*K2))
+        K5 = h*(A0 @ (28.0*(I - K1) - 3*h*(A2 @ (16.0*I + 4.0*K1 + K2)) + K4 + 18.0*K2))
 
-    T = 1.0/(np.abs(alpha)**2)
-    return T, alpha, beta
+        step = I + (28.0*K1 + 32.0*K2 + 6.0*K3 + 4.0*K4 + K5)/360.0
+        H = H @ step
+
+    alpha = np.conjugate(H[0, 0])
+    beta = - H[1, 0]
+    T = float(1.0/(np.abs(alpha)**2))
+    return T, complex(alpha), complex(beta)
+
+def product_integral_convergence(x, mode, N_values = (500, 1000, 2000, 4000, 8000), ustar_min = -50.0, ustar_max = 350.0):
+
+    rows = []
+    previous_T = None
+
+    for n in N_values:
+        T, alpha, beta = product_integral_GBF(x, mode, ustar_min = ustar_min, ustar_max = ustar_max, N = int(n))
+        wronskian = np.abs(alpha)**2 - np.abs(beta)**2
+        relative_change = np.nan if previous_T is None else np.abs(T - previous_T)/np.max(np.abs(T), np.finfo(float).tiny)
+
+        rows.append({"N": int(n), "GBF": T, "alpha": alpha, "beta": beta, "wronskian": float(wronskian), "wronskian_error": float(abs(wronskian - 1.0)), "relative_change_from_previous_N": float(relative_change)})
+        previous_T = T
+
+    return rows
 
 def query_gbf(model, mass, mode, omega_query, x_extract):
 
@@ -879,7 +947,7 @@ def atomic_torch_save(obj, path):
 def get_cpu_model_state(model):
     return {name: value.detach().cpu().clone() for name, value in model.state_dict().items()}
 
-def save_simulation_comparison_plots(omegas, pinn_gbfs, numerical_gbfs, absolute_differences, relative_differences, title_suffix, prefix, method):
+def save_simulation_comparison_plots(omegas, pinn_gbfs, numerical_gbfs, absolute_differences, relative_differences, title_suffix):
 
     plt.figure(figsize=[14, 6])
 
@@ -1077,10 +1145,10 @@ stage_edges = np.linspace(0, adam_iterations, n_stages + 1, dtype = int)
 run_config = {"arguments": vars(args),
     "physical_parameters": {"mass": mass, "mode": mode, "x_extract": x_max, "omega_min": omega_min, "omega_max": omega_max},
     "reproducibility": {"torch_seed": 0, "dtype": str(DTYPE), "device": str(device)},
-    "model": {"in_channels": 2, "out_channels": 4, "hidden_channels": 32, "hidden_layers": 3, "activation": "keerie_adaptive_tanh", "activation_n": 10.0, "ansatz_x_power": 3},
+    "model": {"in_channels": 2, "out_channels": 4, "hidden_channels": 64, "hidden_layers": 3, "activation": "keerie_adaptive_tanh", "activation_n": 10.0, "ansatz_x_power": 3},
     "sampling": {"base_points_per_adam_step": N_points, "x_uniform_fraction": 0.6, "x_beta_alpha": 0.6,
         "x_beta_beta": 0.1, "omega_uniform_fraction": 0.6, "omega_beta_alpha": 0.6, "omega_beta_beta": 2.0, "omega_scaling": "fixed global logarithmic scaling"},
-    "curriculum": {"n_stages": int(n_stages), "stage_lower_bounds": stage_lows.tolist(), "stage_epoch_edges": stage_edges.tolist(), "initial_lower_bound": float(np.sqrt(omega_min*omega_max))},
+    "curriculum": {"n_stages": int(n_stages), "stage_lower_bounds": stage_lows.tolist(), "stage_epoch_edges": stage_edges.tolist(), "initial_lower_bound": float(args.curriculum_start*omega_max)},
     "adam": {"steps": adam_iterations, "learning_rate_initial": learning_rate, "learning_rate_minimum": lr_min, "learning_rate_schedule": "exponential in log space, restarted per stage", "max_gradient_norm": MAX_GRAD_NORM},
     "lbfgs": {"outer_steps_requested": lbfgs_iterations, "max_iter": 20, "history_size": 50, "line_search_fn": "strong_wolfe", "resample_interval_outer_steps": LBFGS_RESAMPLE_INTERVAL},
     "loss": {"flux_weight": 1.0},
@@ -1413,7 +1481,7 @@ print(f"Saved trained model checkpoint to {checkpoint_path}", flush=True)
 
 print("Conditional PINN training complete.", flush = True)
 
-omega_query = np.linspace(omega_min, omega_max, args.query_steps)
+omega_query = np.logspace(np.log10(omega_min), np.log10(omega_max), args.query_steps)
 dense_query_results = query_gbf(model, mass, mode, omega_query, x_max)
 dense_query_omegas = np.array([result['omega'] for result in dense_query_results])
 dense_query_gbfs = np.array([result['gbf'] for result in dense_query_results])
@@ -1532,7 +1600,7 @@ print(f"Loaded {len(numerical_results)} numerical results.")
 query_comparison_csv = os.path.join(comparisons_dir, "PINN_vs_Numerical_query.csv")
 query_comparison_omegas, query_pinn_gbfs, query_numerical_gbfs, query_absolute_differences, query_relative_differences = compare_pinn_to_numerical(dense_query_results,
                     numerical_results, query_comparison_csv) 
-save_simulation_comparison_plots(query_comparison_omegas, query_pinn_gbfs, query_numerical_gbfs, query_absolute_differences, query_relative_differences, "Dense Query Frequencies", "query")
+save_simulation_comparison_plots(query_comparison_omegas, query_pinn_gbfs, query_numerical_gbfs, query_absolute_differences, query_relative_differences, "Dense Query Frequencies")
 
 plt.figure(figsize=[7, 5])
 
@@ -1601,7 +1669,7 @@ with open(result_file_path, 'w') as f:
     f.write(f"lbfgs_success = {lbfgs_success}\n")
 
 checkpoint = {'model_state_dict': model.state_dict(),
-            'model_architecture': {'in_channels': 2, 'out_channels': 4, 'hidden_channels': 32, 'hidden_layers': 3},
+            'model_architecture': {'in_channels': 2, 'out_channels': 4, 'hidden_channels': 64, 'hidden_layers': 3},
             'activation_config': {'type': 'keerie_adaptive_tanh', 'n': 10.0},
             'omega_input_scaling': {'omega_min': omega_min, 'omega_max': omega_max},
             'rar_config': {'interval': RAR_INTERVAL, 'candidates': RAR_CANDIDATES, 'add_per_refinement': RAR_ADD, 'max_points': RAR_MAX, 'min_joint_distance': RAR_MIN_JOINT_DISTANCE,
@@ -1665,15 +1733,19 @@ print(f"Checkpoint saved to {checkpoint_path}", flush = True)
 print("Calculating GBF via product integral approach...")
 print("-"*60)
 
-x_values = np.linspace(mass*omega_min, mass*omega_max, args.query_steps)
-PI_T_list = []
+Momega_values = mass*query_comparison_omegas
 
-for x in x_values:
-    T, alpha, beta = product_integral_GBF(x, mode = mode, ustar_max = 1000, N = 10000)
-    PI_T_list.append(T)
-    unitarity = np.abs(alpha)**2 - np.abs(beta)**2
+PI_T_list = []
+PI_unitarity_list = []
+
+for x in Momega_values:
+    T_PI, alpha_PI, beta_PI = product_integral_GBF(x, mode = mode, ustar_max = 350.0, N = 10000)
+    PI_T_list.append(T_PI)
+    unitarity = np.abs(alpha_PI)**2 - np.abs(beta_PI)**2
+    PI_unitarity_list.append(unitarity)
 
 PI_T = np.asarray(PI_T_list)
+PI_unitarity = np.asarray(PI_unitarity_list)
 abs_diff = np.abs(query_pinn_gbfs - PI_T)
 rel_diff = []
 
@@ -1690,7 +1762,7 @@ plt.figure(figsize = [14, 6])
 
 plt.subplot(1, 2, 1)
 plt.suptitle('Product Integral vs. PINN')
-plt.plot(x_values/mass, PI_T_list, label = 'Product Integral')
+plt.plot(query_comparison_omegas, PI_T, label = 'Product Integral')
 plt.plot(query_comparison_omegas, query_pinn_gbfs, label = 'Conditional PINN')
 plt.xlabel(r'$\omega$', fontsize = 16)
 plt.ylabel(r'$\Gamma(\omega)$', fontsize = 16)
@@ -1699,7 +1771,7 @@ plt.grid()
 plt.legend()
 
 plt.subplot(1, 2, 2)
-plt.plot(x_values/mass, PI_T_list, label = 'Product Integral')
+plt.plot(query_comparison_omegas, PI_T_list, label = 'Product Integral')
 plt.plot(query_comparison_omegas, query_pinn_gbfs, label = 'Conditional PINN')
 plt.yscale('log')
 plt.xlabel(r'$\omega$', fontsize = 16)
@@ -1722,7 +1794,6 @@ plt.xlabel(r'$\omega$', fontsize = 16)
 plt.ylabel(r'Absolute Difference', fontsize = 16)
 plt.title(r'Absolute Difference - Dense Query Frequencies', fontsize = 16)
 plt.grid()
-plt.legend()
 
 plt.subplot(1, 2, 2)
 plt.plot(query_comparison_omegas, rel_diff)
@@ -1731,8 +1802,42 @@ plt.xlabel(r'$\omega$', fontsize = 16)
 plt.ylabel(r'Relative Difference', fontsize = 16)
 plt.title(r'Relative Difference - Dense Query Frequencies', fontsize = 16)
 plt.grid()
-plt.legend()
 
 plt.tight_layout()
 plt.savefig(os.path.join(comparisons_dir, 'PIvsPINN_differences.png'), format = 'png', dpi = 200)
 plt.close()
+
+omega_common = query_comparison_omegas
+Momega_common = mass*omega_common
+
+asymptotic_gbf = low_frequency_limit_GBF(mass, mode, omega_common)
+lowfreq_mask = Momega_common <= args.lowfreq_max_M_omega
+
+fig, ax = plt.subplots(figsize = (8, 6))
+ax.loglog(omega_common, query_numerical_gbfs, label = 'Simulation')
+ax.loglog(omega_common, query_pinn_gbfs, label = 'Conditional PINN')
+ax.loglog(omega_common, PI_T, label = 'Product Integral')
+ax.loglog(omega_common[lowfreq_mask], asymptotic_gbf[lowfreq_mask], "--", label = "Low-frequency limit")
+ax.set_xlabel(r"$\omega$", fontsize = 16)
+ax.set_ylabel(r"$\Gamma(\omega)$", fontsize = 16)
+ax.set_title(f"GBF Comparison, M = {mass}, l = {mode}", fontsize = 16)
+ax.legend()
+fig.tight_layout()
+fig.savefig(os.path.join(comparisons_dir, "Full_GBF_comparison.png"), format = 'png', dpi = 200)
+plt.close(fig)
+
+convergence_results = product_integral_convergence(
+    x=0.2,              # M*omega
+    mode=2,
+    N_values=(1000, 2000, 4000, 8000),
+    ustar_min=-50.0,
+    ustar_max=350.0,
+)
+
+for row in convergence_results:
+    print(
+        f"N={row['N']:5d} | "
+        f"GBF={row['GBF']:.12e} | "
+        f"relative change={row['relative_change_from_previous_N']:.3e} | "
+        f"Wronskian error={row['wronskian_error']:.3e}"
+    )
