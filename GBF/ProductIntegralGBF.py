@@ -59,6 +59,7 @@ def calculate_GBF(x, mode, ustar_min = -50.0, ustar_max = 350.0, N = 10000):
 
 if __name__ =="__main__":
     l = 2
+    mass = 0.5
 
     print(f"Calculating Greybody Factors for spin-2, mode = {l}...")
     print("-"*60)
@@ -75,7 +76,7 @@ if __name__ =="__main__":
         print(f"{x:^12.3f} | {T:^15.6f} | {unitarity:^20.8f}")
 
     plt.figure(figsize = (8, 5))
-    plt.plot(x_values/0.5, T_list, label = 'l = 2, s = 2')
+    plt.plot(x_values/mass, T_list, label = 'l = 2, s = 2')
     plt.xlabel(r'$\omega$', fontsize = 16)
     plt.ylabel(r'$\Gamma_{2, 2}(\omega)$', fontsize = 16)
     plt.title('Grey-body Factor'
