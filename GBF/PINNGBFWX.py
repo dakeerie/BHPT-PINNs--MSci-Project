@@ -598,6 +598,7 @@ def u_from_ustar(ustar):
     large = ~direct
     if np.any(large):
         z_large = z[large]
+        #Asymptotic expansion of W(exp(z))
         w_large = z_large - np.log(z_large) + np.log(z_large)/z_large
 
         for _ in range(8):
@@ -699,7 +700,7 @@ def product_integral_convergence(x, mode, N_values = (500, 1000, 2000, 4000, 800
     for n in N_values:
         T, alpha, beta = product_integral_GBF(x, mode, ustar_min = ustar_min, ustar_max = ustar_max, N = int(n))
         wronskian = np.abs(alpha)**2 - np.abs(beta)**2
-        relative_change = np.nan if previous_T is None else np.abs(T - previous_T)/np.max(np.abs(T), np.finfo(float).tiny)
+        relative_change = np.nan if previous_T is None else np.abs(T - previous_T)/max(abs(T), np.finfo(float).tiny)
 
         rows.append({"N": int(n), "GBF": T, "alpha": alpha, "beta": beta, "wronskian": float(wronskian), "wronskian_error": float(abs(wronskian - 1.0)), "relative_change_from_previous_N": float(relative_change)})
         previous_T = T
