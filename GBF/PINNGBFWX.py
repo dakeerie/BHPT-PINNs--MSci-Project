@@ -13,6 +13,7 @@ import csv
 import json
 from datetime import datetime
 import math
+from scipy.special import lambertw
 
 plt.rcParams.update({
     "font.family": "serif",
@@ -582,6 +583,60 @@ def extraction(model, x_extraction, mass, mode, omega):
     gbf = 1/np.abs(alpha)**2
 
     return alpha, beta, prob, gbf
+
+def u_from_ustar(ustar):
+    """Calculates dimensionless u = r/2M from dimensionless tortoise coordinate u_* = r_*/2M"""
+    arg = np.exp(ustar - 1.0)
+    w = np.real(lambertw(arg))
+    return 1.0 + w
+
+def RW_potential(u, mode):
+    #Dimensionless potential- see appendix B of Gray and Visser paper 
+    return (1.0 - 1.0/u)*(mode*(mode + 1)/u**2 -3/u**3)
+
+def product_integral_GBF(x, mode, ustar_min = -50.0, ustar_max = 350.0, N = 10000):
+    """Calculates the GBF for dimensionless frequency x = M*omega using the path-ordered exponential/product integral approach.
+        Parameters: 
+            x: float, dimensionless frequency x = M*omega
+            mode: int, multipole mode l (>=2 here)
+            ustar_min: float, lower boundary approximating -infinity (event horizon)
+            ustar_max: float, upper boundary approximating +infinity (spatial infinity)
+            N: int, number of integration grid points
+
+        Returns:
+            T: float, transmission probability i.e. GBF
+            alpha: complex, Bogoliubov coefficient alpha(x)
+            beta: complex, Bogoliubov coefficient beta(x)
+    """
+    ustar_grid = np.linspace(ustar_min, ustar_max, N)
+    h = (ustar_max - ustar_min)/(N - 1)
+
+    u_grid = u_from_ustar(ustar_grid)
+    V_grid = RW_potential(u_grid, mode)
+
+    #Pre-calculate matrix factors
+    #A(u_*) = -i/(4x)*V(u_*)*[[1, exp(-4ixu_*)], [-exp(4ixu_*), -1]]
+    coefficient = -1j*V_grid/(4.0*x)
+    phase = np.exp(4j*x*ustar_grid)
+
+    #Matrix elements for M_k = I + A(u*_k)*h
+    M00 = 1.0 + coefficient*h
+    M01 = coefficient*h*np.conj(phase)
+    M10 = -coefficient*h*phase
+    M11 = 1.0 - coefficient*h
+
+    #Evaluate product integral: E = M_{N-1} @ M_{N - 2} @ ... @ M_0
+    E = np.identity(2, dtype = complex)
+    for k in range(N):
+        Mk = np.array([[M00[k], M01[k]], [M10[k], M11[k]]])
+        E = Mk @ E
+
+    #Extract Bogoliubov coefficients
+    alpha = E[0, 0]
+    beta = E[1, 0]
+
+    T = 1.0/(np.abs(alpha)**2)
+    return T, alpha, beta
 
 def query_gbf(model, mass, mode, omega_query, x_extract):
 
@@ -1604,3 +1659,4 @@ checkpoint_path = os.path.join(base_path, f'pinn_conditional_GBFWX_l{mode}.pth')
 atomic_torch_save(checkpoint, checkpoint_path)
 
 print(f"Checkpoint saved to {checkpoint_path}", flush = True)
+
