@@ -829,8 +829,8 @@ def save_comparison_plots(omegas, pinn_gbfs, numerical_gbfs, absolute_difference
     plt.figure(figsize=[14, 6])
 
     plt.subplot(1, 2, 1)
-    plt.plot(omegas, numerical_gbfs, 'o-', label='Numerical')
-    plt.plot(omegas, pinn_gbfs, 'x-', label='Conditional PINN')
+    plt.plot(omegas, numerical_gbfs, label='Numerical')
+    plt.plot(omegas, pinn_gbfs, label='Conditional PINN')
     plt.xlabel(r'$\omega$', fontsize=16)
     plt.ylabel(r'$\Gamma(\omega)$', fontsize=16)
     plt.title(f'GBF Comparison — {title_suffix}')
@@ -838,8 +838,8 @@ def save_comparison_plots(omegas, pinn_gbfs, numerical_gbfs, absolute_difference
     plt.legend()
 
     plt.subplot(1, 2, 2)
-    plt.plot(omegas, numerical_gbfs, 'o-', label='Numerical')
-    plt.plot(omegas, pinn_gbfs, 'x-', label='Conditional PINN')
+    plt.plot(omegas, numerical_gbfs, label='Numerical')
+    plt.plot(omegas, pinn_gbfs, label='Conditional PINN')
     plt.xlabel(r'$\omega$', fontsize=16)
     plt.ylabel(r'$\Gamma(\omega)$', fontsize=16)
     plt.yscale('log')
@@ -854,7 +854,7 @@ def save_comparison_plots(omegas, pinn_gbfs, numerical_gbfs, absolute_difference
     plt.figure(figsize=[14, 6])
 
     plt.subplot(1, 2, 1)
-    plt.plot(omegas, absolute_differences, 'o-')
+    plt.plot(omegas, absolute_differences)
     plt.xlabel(r'$\omega$', fontsize=16)
     plt.ylabel('Absolute Difference', fontsize=16)
     plt.title(f'Absolute Difference — {title_suffix}')
@@ -862,7 +862,7 @@ def save_comparison_plots(omegas, pinn_gbfs, numerical_gbfs, absolute_difference
     plt.grid()
 
     plt.subplot(1, 2, 2)
-    plt.plot(omegas, relative_differences, 'o-')
+    plt.plot(omegas, relative_differences)
     plt.xlabel(r'$\omega$', fontsize=16)
     plt.ylabel('Relative Difference', fontsize=16)
     plt.title(f'Relative Difference — {title_suffix}')
@@ -947,7 +947,7 @@ t.manual_seed(0)
 if t.cuda.is_available():
     t.cuda.manual_seed_all(0)
 
-model = Model(2, 4, 32, num_hidden_layers = 3).to(device = device, dtype = DTYPE)
+model = Model(2, 4, 64, num_hidden_layers = 3).to(device = device, dtype = DTYPE)
     
 #Make various directories for saving results
 run_id = datetime.now().strftime("%Y%m%d_%H%M%S")
