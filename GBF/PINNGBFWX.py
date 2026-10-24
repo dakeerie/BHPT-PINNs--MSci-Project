@@ -214,7 +214,9 @@ def taylor_coeffs(mass, mode, omega):
     Omega = 4*mass*omega
     c1 = (Lambda - 3)/(1 - 1j*Omega)
     c2 = ((Lambda + 1)*c1 + 3)/(4 - 1j*2*Omega)
-    return c1.real, c1.imag, c2.real, c2.imag
+    c3 = (Lambda + 9)*c2/(6 + 3*(1 - 1j*Omega))
+    c4 = ((Lambda + 21)*c3 - 5*c2)/(12 + 4*(1 - 1j*Omega))
+    return c1.real, c1.imag, c2.real, c2.imag, c3.real, c3.imag, c4.real, c4.imag
 
 #Flux loss annealing
 def annealing(epoch, total_epochs):
@@ -427,7 +429,7 @@ def ansatz(model, x_tensor, mass, mode, omega):
 
     omega_tensor = prepare_omega_tensor(omega, x_tensor)
 
-    c1_re, c1_im, c2_re, c2_im = taylor_coeffs(mass, mode, omega_tensor)
+    c1_re, c1_im, c2_re, c2_im, c3_re, c3_im, c4_re, c4_im = taylor_coeffs(mass, mode, omega_tensor)
 
     omega_scaled = scale_omega(omega_tensor)
 
@@ -439,8 +441,8 @@ def ansatz(model, x_tensor, mass, mode, omega):
     rstar = 2*mass/(1 - x_safe) + 2*mass*t.log(x_safe/(1 - x_safe))
     cs, sn = t.cos(2*omega_tensor*rstar), t.sin(2*omega_tensor*rstar)
 
-    u_re = 1 + c1_re*x_tensor + c2_re*x_tensor**2 + x_tensor**3*(P_re + Q_re*cs - Q_im*sn)
-    u_im = c1_im*x_tensor + c2_im*x_tensor**2 + x_tensor**3*(P_im + Q_im*cs + Q_re*sn)
+    u_re = 1 + c1_re*x_tensor + c2_re*x_tensor**2 + c3_re*x_tensor**3 + c4_re*x_tensor**4 + x_tensor**5*(P_re + Q_re*cs - Q_im*sn)
+    u_im = c1_im*x_tensor + c2_im*x_tensor**2 + c3_im*x_tensor**3 + c4_im*x_tensor**4 + x_tensor**5*(P_im + Q_im*cs + Q_re*sn)
     return u_re, u_im, P_re, P_im, Q_re, Q_im
 
 #Coefficient of low-frequency limit of GBF (in Finnian Gray paper \Gamma \approx C_{l,s} (M\omega)^{2l+2}) with C_{l,2} given by function below 
@@ -1146,7 +1148,7 @@ stage_edges = np.linspace(0, adam_iterations, n_stages + 1, dtype = int)
 run_config = {"arguments": vars(args),
     "physical_parameters": {"mass": mass, "mode": mode, "x_extract": x_max, "omega_min": omega_min, "omega_max": omega_max},
     "reproducibility": {"torch_seed": 0, "dtype": str(DTYPE), "device": str(device)},
-    "model": {"in_channels": 2, "out_channels": 4, "hidden_channels": 64, "hidden_layers": 3, "activation": "keerie_adaptive_tanh", "activation_n": 10.0, "ansatz_x_power": 3},
+    "model": {"in_channels": 2, "out_channels": 4, "hidden_channels": 64, "hidden_layers": 3, "activation": "keerie_adaptive_tanh", "activation_n": 10.0, "ansatz_x_power": 5},
     "sampling": {"base_points_per_adam_step": N_points, "x_uniform_fraction": 0.6, "x_beta_alpha": 0.6,
         "x_beta_beta": 0.1, "omega_uniform_fraction": 0.6, "omega_beta_alpha": 0.6, "omega_beta_beta": 2.0, "omega_scaling": "fixed global logarithmic scaling"},
     "curriculum": {"n_stages": int(n_stages), "stage_lower_bounds": stage_lows.tolist(), "stage_epoch_edges": stage_edges.tolist(), "initial_lower_bound": float(args.curriculum_start*omega_max)},
@@ -1675,7 +1677,7 @@ checkpoint = {'model_state_dict': model.state_dict(),
             'omega_input_scaling': {'omega_min': omega_min, 'omega_max': omega_max},
             'rar_config': {'interval': RAR_INTERVAL, 'candidates': RAR_CANDIDATES, 'add_per_refinement': RAR_ADD, 'max_points': RAR_MAX, 'min_joint_distance': RAR_MIN_JOINT_DISTANCE,
                         "restart_after": RAR_RESTART_AFTER},
-            'ansatz_config': {'nn_output_scale': 1.0, 'x_power': 3, 'x_safe_min': 1e-12, 'x_safe_max': 1 - 1e-3},
+            'ansatz_config': {'nn_output_scale': 1.0, 'x_power': 5, 'x_safe_min': 1e-12, 'x_safe_max': 1 - 1e-3},
             'mass': mass,
             'mode': mode,
             'x_max': x_max,
@@ -1814,17 +1816,19 @@ Momega_common = mass*omega_common
 asymptotic_gbf = low_frequency_limit_GBF(mass, mode, omega_common)
 lowfreq_mask = Momega_common <= args.lowfreq_max_M_omega
 
-fig, ax = plt.subplots(figsize = (8, 6))
-ax.loglog(omega_common, query_numerical_gbfs, label = 'Simulation')
-ax.loglog(omega_common, query_pinn_gbfs, label = 'Conditional PINN')
-ax.loglog(omega_common, PI_T, label = 'Product Integral')
-ax.loglog(omega_common[lowfreq_mask], asymptotic_gbf[lowfreq_mask], "--", label = "Low-frequency limit")
-ax.set_xlabel(r"$\omega$", fontsize = 16)
-ax.set_ylabel(r"$\Gamma(\omega)$", fontsize = 16)
-ax.set_title(f"GBF Comparison, M = {mass}, l = {mode}", fontsize = 16)
-ax.legend()
-fig.tight_layout()
-fig.savefig(os.path.join(comparisons_dir, "Full_GBF_comparison.png"), format = 'png', dpi = 200)
+plt.figure(figsize = (7, 6))
+plt.plot(omega_common, query_numerical_gbfs, label = 'Simulation')
+plt.plot(omega_common, query_pinn_gbfs, label = 'Conditional PINN')
+plt.plot(omega_common, PI_T, label = 'Product Integral')
+plt.plot(omega_common[lowfreq_mask], asymptotic_gbf[lowfreq_mask], "--", label = "Low-frequency limit")
+plt.xscale('log')
+plt.yscale('log')
+plt.xlabel(r"$\omega", fontsize = 16)
+plt.ylabel(r"$\Gamma(\omega)$", fontsize = 16)
+plt.title(f"GBF Comparison, M = {mass}, l = {mode}", fontsize = 16)
+plt.legend()
+plt.tight_layout()
+plt.savefig(os.path.join(comparisons_dir, "Full_GBF_comparison.png"), format = 'png', dpi = 200)
 plt.close(fig)
 
 convergence_results = product_integral_convergence(
