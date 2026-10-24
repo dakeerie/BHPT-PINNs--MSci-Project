@@ -433,6 +433,10 @@ def select_rar_joint_points(model, n_candidates, n_add, x_max, mass, mode, devic
 
     return new_x, new_omega, new_scores
 
+def smoothstep(z):
+    z = float(np.clip(z, 0.0, 1.0))
+    return z*z*(3.0 - 2.0*z) #slight increasing curve between z = 0 and z = 1
+
 #Ansatz for the wave-function u
 #Ansatz is of the form u(x) = 1 + c1*x + c2*x**2 + (P + exp(2i*omega*r_star)*Q) 
 #where P and Q are complex with components corresponding to the four channel neural network output
@@ -470,7 +474,6 @@ def low_frequency_limit_GBF(mass, mode, omega):
     dimensionless_omega = mass*omega
     C = low_frequency_GBF_coeff(mode)
     return C*(dimensionless_omega)**(2*mode + 2)
-
 
 def differentiable_lowfreq_gbf(model, mass, mode,  omega_values, x_extract):
 
@@ -551,8 +554,18 @@ def compute_loss(model, x_tensor, mass, mode, omega, flux_weight):
     J = g(x_tensor, mass)*(u_re*du_im - u_im*du_re) - omega*(u_re**2 + u_im**2 - 1) # should = 0 analytically
     loss_flux = t.mean(J**2)
 
+    active = lowfreq_omega[:, 0] >= omega_low
+
+    if not active.any():
+        loss_lowfreq = t.zeros((), dtype = DTYPE, device = device)
+    else:
+        omega_active = lowfreq_omega[active]
+        target_active = lowfreq_gbf_target[active]
+
+        gbf_pred = differentiable_lowfreq_gbf(model, mass, mode, omega_active, x_max)
+        loss_lowfreq = t.mean(t.log(gbf_pred.clamp_min(t.finfo(DTYPE).tiny)) - t.log(target_active.clamp_min(t.finfo(DTYPE).tiny)))**2
+
     #Loss annealing to be included
-    loss_lowfreq = compute_lowfreq_gbf_loss(model, mass, mode)
     total_loss = loss_ode + flux_weight*loss_flux + args.lowfreq_weight*loss_lowfreq
 
     return u_re, u_im, J, total_loss, loss_flux, loss_lowfreq, loss_ode, loss_ode_re, loss_ode_im, res_ode_re, res_ode_im, P_re, P_im, Q_re, Q_im
@@ -1176,6 +1189,9 @@ with open(config_path, "w") as f:
 
 print(f"Saved run configuration to {config_path}", flush=True)
 
+lr_progress = np.array([0.0, 0.10, 0.60, 1.0])
+lr_values = np.array([1e-3, 2e-4, 2e-5, 1e-6])
+
 #Adam loop
 for epoch in range(adam_iterations):
 
@@ -1198,10 +1214,18 @@ for epoch in range(adam_iterations):
         rar_x = t.cat([rar_x, new_rar_x], dim = 0)
         rar_omega  = t.cat([rar_omega, new_rar_omega], dim = 0)
 
-    stage_progress = (epoch - stage_start)/max(1, stage_end - stage_start - 1)
-    stage_progress = float(np.clip(stage_progress, 0.0, 1.0))
+    progress = epoch/max(adam_iterations - 1, 1)
+    omega_initial = args.curriculum_start*omega_max
+    expansion = smoothstep((progress - 0.1)/0.5)
 
-    learning_rate_used = learning_rate*(lr_min/learning_rate)**stage_progress
+    omega_low = np.exp((1.0 - expansion)*np.log(omega_initial) + expansion*np.log(omega_min))
+
+    learning_rate_used = 10.0**np.interp(progress, lr_progress, np.log10(lr_values))
+
+    # stage_progress = (epoch - stage_start)/max(1, stage_end - stage_start - 1)
+    # stage_progress = float(np.clip(stage_progress, 0.0, 1.0))
+
+    # learning_rate_used = learning_rate*(lr_min/learning_rate)**stage_progress
 
     for group in optimiser.param_groups:
         group["lr"] = learning_rate_used
