@@ -218,6 +218,17 @@ def taylor_coeffs(mass, mode, omega):
     c4 = ((Lambda + 21)*c3 - 5*c2)/(12 + 4*(1 - 1j*Omega))
     return c1.real, c1.imag, c2.real, c2.imag, c3.real, c3.imag, c4.real, c4.imag
 
+def static_solution_coeffs(mass, mode):
+    L = mode*(mode + 1)
+    a = {mode + 1: 1.0} #Normalised coefficient of maximal power in the static solution polynomial - order l + 1 polynomial. Choose a_{l + 1} = 1 and then build other coeffs via recurrence relation
+    for j in range(mode + 1, 3, -1): #Maximum power is always l + 1 so minimum power is 3 as l>=2
+        a[j - 1] = (2*mass*(j - 3)*(j + 1))/((j - 1)*(j - 2) - L)*a[j]
+    norm = sum(a.values())
+    return {k: v/norm for k, v in a.items()}
+
+static_coeffs = static_solution_coeffs(mass, mode)
+C_L = float(np.prod(np.arange(1, 2*mode + 2, 2)))**(1/(mode + 1)) #((2l+1)!!)^(1/(l+1))
+
 #Flux loss annealing
 def annealing(epoch, total_epochs):
     # lambda_initial = 10.0
@@ -1742,7 +1753,7 @@ PI_T_list = []
 PI_unitarity_list = []
 
 for x in Momega_values:
-    T_PI, alpha_PI, beta_PI = product_integral_GBF(x, mode = mode, ustar_max = 350.0, N = 10000)
+    T_PI, alpha_PI, beta_PI = product_integral_GBF(x, mode = mode, ustar_max = 350.0, N = 20000)
     PI_T_list.append(T_PI)
     unitarity = np.abs(alpha_PI)**2 - np.abs(beta_PI)**2
     PI_unitarity_list.append(unitarity)
@@ -1823,9 +1834,10 @@ plt.plot(omega_common, PI_T, label = 'Product Integral')
 plt.plot(omega_common[lowfreq_mask], asymptotic_gbf[lowfreq_mask], "--", label = "Low-frequency limit")
 plt.xscale('log')
 plt.yscale('log')
-plt.xlabel(r"$\omega", fontsize = 16)
+plt.xlabel(r"$\omega$", fontsize = 16)
 plt.ylabel(r"$\Gamma(\omega)$", fontsize = 16)
 plt.title(f"GBF Comparison, M = {mass}, l = {mode}", fontsize = 16)
+plt.grid()
 plt.legend()
 plt.tight_layout()
 plt.savefig(os.path.join(comparisons_dir, "Full_GBF_comparison.png"), format = 'png', dpi = 200)
