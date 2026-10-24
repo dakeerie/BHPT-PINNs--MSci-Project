@@ -563,7 +563,7 @@ def compute_loss(model, x_tensor, mass, mode, omega, flux_weight):
         target_active = lowfreq_gbf_target[active]
 
         gbf_pred = differentiable_lowfreq_gbf(model, mass, mode, omega_active, x_max)
-        loss_lowfreq = t.mean(t.log(gbf_pred.clamp_min(t.finfo(DTYPE).tiny)) - t.log(target_active.clamp_min(t.finfo(DTYPE).tiny)))**2
+        loss_lowfreq = t.mean((t.log(gbf_pred.clamp_min(t.finfo(DTYPE).tiny)) - t.log(target_active.clamp_min(t.finfo(DTYPE).tiny)))**2)
 
     #Loss annealing to be included
     total_loss = loss_ode + flux_weight*loss_flux + args.lowfreq_weight*loss_lowfreq
