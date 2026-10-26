@@ -38,6 +38,7 @@ parser.add_argument('--curriculum_start', type = float, default = 0.5, help = 'F
 parser.add_argument('--lowfreq_weight', type = float, default = 1e-3, help = 'Weight of the asymptotic low=frequency GBF loss. Set to 0 to disable')
 parser.add_argument('--lowfreq_max_M_omega', type =  float, default = 0.1, help = 'Largest  M*omega for which the asymptotic GBF loss will be applied')
 parser.add_argument('--lowfreq_points', type = int, default = 64, help = 'Number of fixed log-spaced frequencies for the low-frequency GBF loss')
+parser.add_argument('--envelope_M_omega_b', type = float, default = 0.1, help = 'Fixed dimensionless crossover M*omega_b for the static amplitude envelope (frequency gate); not currently trainable')
 
 args = parser.parse_args()
 mass = args.mass
@@ -79,6 +80,9 @@ if args.lowfreq_points < 2:
 
 if not (1e-6 < x_max <= 1.0 - 1e-3):
     raise ValueError("x_extract must be in (1e-6, 0.999] for the current ansatz clamp.")
+
+if args.envelope_M_omega_b <= 0:
+    raise ValueError("envelope_M_omega_b must be positive.")
 
 #Frequency schedule from high to low for continuation
 omega_min = float(args.omega_final)
@@ -218,23 +222,155 @@ def taylor_coeffs(mass, mode, omega):
     return c1.real, c1.imag, c2.real, c2.imag, c3.real, c3.imag, c4.real, c4.imag
 
 def static_solution_coeffs(mass, mode):
+    #Horizon-regular static solution coefficients for the dimensionless spin-2 ODE with y = 1 - x = 2M/r and static wavefunction
+    # u_s(y) = sum_{k = 3}^{l + 1} a_k y^{-k}. Coefficients normalised so that u_s(1) = 1 and coefficients are independent of mass.
+    #A recurrence relation can be derived for the coefficients a_k.
+
     L = mode*(mode + 1)
-    a = {mode + 1: 1.0} #Normalised coefficient of maximal power in the static solution polynomial - order l + 1 polynomial. Choose a_{l + 1} = 1 and then build other coeffs via recurrence relation
+    coeffs = {mode + 1: 1.0} 
     for j in range(mode + 1, 3, -1): #Maximum power is always l + 1 so minimum power is 3 as l>=2
-        a[j - 1] = (2*mass*(j - 3)*(j + 1))/((j - 1)*(j - 2) - L)*a[j]
-    norm = sum(a.values())
-    return {k: v/norm for k, v in a.items()}
+        denominator = (j - 1)*(j - 2) - L
+        if denominator == 0:
+            raise ZeroDivisionError(f"Singular static-coefficient recurrence at l = {mode}, j = {j}.")
+        coeffs[j - 1] = (j - 3)*(j + 1)/denominator*coeffs[j]
 
-def amplitude_envelope(model, x, mass, mode, omega):
-    y = 1.0 - x
-    c_l = float(np.prod(np.arange(1, 2*mode + 2, 2)))**(1/(mode + 1)) #((2l+1)!!)^(1/(l+1)) constant in characteristic radius: epsilon = 2Momega/c_l
-    epsilon = 2*mass*omega/c_l
+    norm = sum(coeffs.values())
+    if not np.isfinite(norm) or abs(norm) < 1e-14:
+        raise ValueError(f"Cannot normalise static solution coefficients for l = {mode}.")
+    
+    return {k: float(v/norm) for k, v in coeffs.items()}
 
-    static_coeffs = static_solution_coeffs(mass, mode)
-    u_s = sum(c*y**(-k) for k, c in static_coeffs.items())
-    envelope = ((1.0 + epsilon**2)/(1.0 + (epsilon/y)**2))**(0.5(mode + 1))
-    gate = 1/(1.0 + (omega/t.exp(model.log_omega_b))**(2*(mode + 1)))
-    return t.exp(gate*t.log(u_s*envelope))
+ENVELOPE_M_OMEGA_B = float(args.envelope_M_omega_b)
+
+def characteristic_radius_scale(mode):
+    #c_l = ((2l + 1)!!)**(1/(l+1)), used in the characteristic radius: epsilon = 2Momega/c_l
+    l = int(mode)
+    return float(np.prod(np.arange(1, 2*mode + 2, 2)))**(1/(mode + 1))
+
+def amplitude_envelope(model, x, mass, mode, omega, return_components = False):
+    #E(x, omega) = [u_s(y)*F(y, omega)]**g(omega), y = 1 - x
+    #with F = [(1 + epsilon**2)/(1 + (epsilon/y)**2)]**((l+1)/2), epsilon = 2Momega/c_l
+    #and g is the frequency gate, g = 1/[1 + (M*omega/(M*omega_b))]**(2*(l+1))
+    #Envelope E(x, omega) constructed so that it smoothes the near and far zone static solutions together- derived by asymptotic matching of these two regions.
+    #E(0, omega) = 1 and E(x, omega) multiplies only the x^5 neural correctino so the prescribed horizon Taylor coefficients remain unchanged.
+    omega_tensor = prepare_omega_tensor(omega, x)
+
+    y = (1.0 - x).clamp(min = 1e-12)
+    u_static = t.zeros_like(y)
+    for k, coeff in static_solution_coeffs(int(mode)).items():
+        u_static = u_static + coeff*y.pow(-k)
+
+    c_l = characteristic_radius_scale(mode)
+    epsilon = 2.0*mass*omega/c_l
+
+    far_factor = ((1.0 + epsilon**2)/(1.0 + (epsilon/y)**2))**(0.5*(mode + 1))
+
+    M_omega = mass*omega_tensor
+    gate = 1.0/(1.0 + (M_omega/ENVELOPE_M_OMEGA_B)**(2*(mode + 1)))
+    raw_envelope = u_static*far_factor
+    envelope = t.exp(gate*t.log(raw_envelope.clamp_min(t.finfo(x.dtype).tiny)))
+
+    if return_components:
+        return envelope, {"u_static": u_static, "far_factor": far_factor, "gate": gate, "raw_envelope": raw_envelope, "correction_prefactor": x**5*envelope}
+
+    return envelope
+
+def numpy_envelope_components(x_values, omega_value, mass, mode):
+    #Numpy components of amplitude_envelope for plotting diagnostics
+    x_values = np.asarray(x_values, dtype = float)
+    y = np.maximum(1.0 - x_values, 1e-12)
+    u_static = np.zeros_like(y)
+    for k, coeff in static_solution_coeffs(int(mode)).items():
+        u_static += coeff*y**(-k)
+
+    c_l = characteristic_radius_scale(mode)
+    epsilon = 2*mass*float(omega_value)/c_l
+    far_factor = ((1.0 + epsilon**2)/(1.0 + (epsilon/y)**2))**(0.5*(mode + 1))
+    gate_value = 1.0/(1.0 + (mass*float(omega_value)/ENVELOPE_M_OMEGA_B)**(2*(mode + 1)))
+    raw_envelope = u_static*far_factor
+    envelope = np.exp(gate_value*np.log(np.maximum(raw_envelope, np.finfo(float).tiny)))
+
+    return {"u_static": u_static, "far_factor": far_factor, "gate": np.full_like(x_values, gate_value), "raw_envelope": raw_envelope, "envelope": envelope, "correction_prefactor": x_values**5*envelope}
+
+def plot_amplitude_envelope_diagnostics(mass, mode, x_max, omega_min, omega_max):
+    #Save envelope profiles, components, a frequency heatmap and gate diagnostics
+
+    x_values = np.linspace(1e-6, x_max, 1200)
+    omega_values = np.array([omega_min, np.sqrt(omega_min*omega_max), omega_max])
+    labels = [rf"$M \omega = {mass*om:.3g}$" for om in omega_values]
+
+    fig, axes = plt.subplot(1, 2, figsize = (13, 5))
+    for om, label in zip(omega_values, labels):
+        comp = numpy_envelope_components(x_values, om, mass, mode)
+        axes[0].logy(x_values, comp["envelope"], label = label)
+        axes[1].logy(x_values, np.maximum(comp["correction_prefactor"], 1e-30), label = label)
+    axes[0].set(xlabel = r"$x$", ylabel = r"$E(x, \omega)$", title = "Static Amplitude Envelope")
+    axes[1].set(xlabel = r"$x$", ylabel = r"$x^5 E(x, \omega)$", title = "Effective NN-output pre-factor")
+    for ax in axes:
+        ax.grid(True, which = "both")
+        ax.legend()
+    fig.suptitle(rf"Amplitude envelope, $\ell = {mode}$, fixed $M \omega_b = {ENVELOPE_M_OMEGA_B:g}$")
+    fig.tight_layout()
+    fig.savefig(os.path.join(diagnostic_dir, "amplitude_envelope_profiles.png"), format = 'png', dpi = 200)
+    plt.close(fig)
+
+    fig, axes = plt.subplots(1, 3, figsize = (15, 4.8), sharex = True)
+    components = [("u_static", r"$\log_{10} u_s$", "Static branch"), ("far_factor", r"$\log_{10} F$", "Far-zone taper"), ("envelope", r"$\log_{10} E$", "Gated envelope")]
+    for ax, (key, ylabel, title) in zip(axes, components):
+        for om, label in zip(omega_values, labels):
+            comp = numpy_envelope_components(x_values, om, mass, mode)
+            ax.plot(x_values, np.log10(np.maximum(comp[key], 1e-300)), label = label)
+        ax.set(xlabel = r"$x$", ylabel = ylabel, title = title)
+        ax.grid(True)
+    axes[-1].legend(fontsize = 8)
+    fig.suptitle(rf"Envelope copmonts, $\ell = {mode}$")
+    fig.tight_layout()
+    fig.savefig(os.path.join(diagnostic_dir, "amplitude_envelope_components"), format = 'png', dpi = 200)
+    plt.close(fig)
+
+    Momega_line = np.logspace(np.log10(mass*omega_min), np.log10(mass*omega_max), 300)
+    gate_line = 1.0/(1.0 + (Momega_line/ENVELOPE_M_OMEGA_B)**(2*(mode + 1)))
+    envelope_extract, prefactor_extract = [], []
+    for Mw in Momega_line:
+        comp = numpy_envelope_components(np.array([x_max]), Mw/mass, mass, mode)
+        envelope_extract.append(comp["envelope"][0])
+        prefactor_extract.append(comp["correction_prefactor"][0])
+
+    fig, axes = plt.subplots(1, 2, figsize=(12, 4.5))
+    axes[0].semilogx(Momega_line, gate_line)
+    axes[0].axvline(ENVELOPE_M_OMEGA_B, linestyle="--", alpha=0.7, label=r"$M\omega_b$")
+    axes[0].set(xlabel=r"$M\omega$", ylabel=r"$g(\omega)$", ylim=(-0.03, 1.03), title="Fixed frequency gate")
+    axes[0].legend()
+    axes[1].loglog(Momega_line, envelope_extract, label=r"$E(x_{\max},\omega)$")
+    axes[1].loglog(Momega_line, np.maximum(prefactor_extract, 1e-300), label=r"$x_{\max}^5 E(x_{\max},\omega)$")
+    axes[1].set(xlabel=r"$M\omega$", ylabel="Envelope / prefactor", title="At extraction coordinate")
+    axes[1].legend()
+    for ax in axes:
+        ax.grid(True, which="both", alpha=0.3)
+    fig.suptitle(rf"Envelope frequency dependence, $\ell={mode}$")
+    fig.tight_layout()
+    fig.savefig(os.path.join(diagnostic_dir, "amplitude_envelope_frequency.png"), dpi=200)
+    plt.close(fig)
+
+    # Export coefficients and samples for reproducibility.
+    with open(os.path.join(diagnostic_dir, "static_solution_coefficients.csv"), "w", newline="") as f:
+        writer = csv.writer(f)
+        writer.writerow(["power_k", "coefficient_a_k"])
+        for k, coeff in sorted(static_solution_coeffs(int(mode)).items()):
+            writer.writerow([k, f"{coeff:.16e}"])
+
+    with open(os.path.join(diagnostic_dir, "amplitude_envelope_sample.csv"), "w", newline="") as f:
+        writer = csv.writer(f)
+        writer.writerow(["x", "omega", "Momega", "u_static", "far_factor", "gate", "envelope", "x5_envelope"])
+        for om in omega_values:
+            comp = numpy_envelope_components(x_values, om, mass, mode)
+            for j, xv in enumerate(x_values):
+                writer.writerow([
+                    f"{xv:.10e}", f"{om:.10e}", f"{mass*om:.10e}",
+                    f"{comp['u_static'][j]:.12e}", f"{comp['far_factor'][j]:.12e}",
+                    f"{comp['gate'][j]:.12e}", f"{comp['envelope'][j]:.12e}",
+                    f"{comp['correction_prefactor'][j]:.12e}",
+                ])
 
 #Flux loss annealing
 def annealing(epoch, total_epochs):
@@ -445,8 +581,9 @@ def smoothstep(z):
     return z*z*(3.0 - 2.0*z) #slight increasing curve between z = 0 and z = 1
 
 #Ansatz for the wave-function u
-#Ansatz is of the form u(x) = 1 + c1*x + c2*x**2 + (P + exp(2i*omega*r_star)*Q) 
+#Ansatz is of the form u(x) = 1 + c1*x + c2*x**2 + c3*x**3 + c4*x*4 + x**5*E(x, omega)*(P + exp(2i*omega*r_star)*Q) 
 #where P and Q are complex with components corresponding to the four channel neural network output
+#Envelope E scales only the neural network correction and is fixed (not trainable at the moment)
 def ansatz(model, x_tensor, mass, mode, omega):
 
     omega_tensor = prepare_omega_tensor(omega, x_tensor)
@@ -463,8 +600,11 @@ def ansatz(model, x_tensor, mass, mode, omega):
     rstar = 2*mass/(1 - x_safe) + 2*mass*t.log(x_safe/(1 - x_safe))
     cs, sn = t.cos(2*omega_tensor*rstar), t.sin(2*omega_tensor*rstar)
 
-    u_re = 1 + c1_re*x_tensor + c2_re*x_tensor**2 + c3_re*x_tensor**3 + c4_re*x_tensor**4 + x_tensor**5*(P_re + Q_re*cs - Q_im*sn)
-    u_im = c1_im*x_tensor + c2_im*x_tensor**2 + c3_im*x_tensor**3 + c4_im*x_tensor**4 + x_tensor**5*(P_im + Q_im*cs + Q_re*sn)
+    #Envelope
+    env = amplitude_envelope(x_tensor, mass, mode, omega_tensor)
+
+    u_re = 1 + c1_re*x_tensor + c2_re*x_tensor**2 + c3_re*x_tensor**3 + c4_re*x_tensor**4 + x_tensor**5*env*(P_re + Q_re*cs - Q_im*sn)
+    u_im = c1_im*x_tensor + c2_im*x_tensor**2 + c3_im*x_tensor**3 + c4_im*x_tensor**4 + x_tensor**5*env*(P_im + Q_im*cs + Q_re*sn)
     return u_re, u_im, P_re, P_im, Q_re, Q_im
 
 #Coefficient of low-frequency limit of GBF (in Finnian Gray paper \Gamma \approx C_{l,s} (M\omega)^{2l+2}) with C_{l,2} given by function below 
@@ -646,13 +786,11 @@ def RW_potential(u, mode):
     return (1.0 - 1.0/u)*(mode*(mode + 1)/u**2 -3/u**3)
 
 def negative_integrand_values(ustar_nodes, Momega, mode):
-    """Return samples of -A(u*) from eq. (4.13) of Gray & Visser.
+    #Return samples of -A(u*) from eq. (4.13) of Gray & Visser.
+    #A(u*) = -i V(u*)/(4Momega) [[1, exp(-4iMomegau*)], [-exp(4iMomegau*), -1]].
+    # Sign is reversed because the Helton-Stuckwisch recursion used in eq. (3.14) has the opposite product-order converntion.
+    # Applying this to -A approximates the inverse of the desired transfer matrix (eq. 3.11) containing the Bogoliubov coefficients.
 
-    A(u*) = -i V(u*)/(4Momega) [[1, exp(-4iMomegau*)], [-exp(4iMomegau*), -1]].
-
-    Sign is reversed because the Helton-Stuckwisch recursion used in eq. (3.14) has the opposite product-order converntion.
-    Applying this to -A approximates the inverse of the desired transfer matrix (eq. 3.11) containing the Bogoliubov coefficients.
-    """
     u = u_from_ustar(ustar_nodes)
     potential = RW_potential(u, mode)
     coeff = 1j*potential/(4.0*Momega)
@@ -666,20 +804,20 @@ def negative_integrand_values(ustar_nodes, Momega, mode):
     return A
 
 def product_integral_GBF(x, mode, ustar_min = -50.0, ustar_max = 350.0, N = 10000):
-    """Calculates the GBF for dimensionless frequency x = M*omega using a fifth order path-ordered exponential/product integral approach.
-        Parameters: 
-            x: float, dimensionless frequency x = M*omega
-            mode: int, multipole mode l (>=2 here)
-            ustar_min, ustar_max: float, finite approximation of tortoise coordinate limits- paper uses [-50, 350]
-            N: int, number of product-integral subintervals (not grid points). Each interval samples A at five equally spaced nodes as in eq. (3.13)
+    # Calculates the GBF for dimensionless frequency x = M*omega using a fifth order path-ordered exponential/product integral approach.
+    # Parameters: 
+    #     x: float, dimensionless frequency x = M*omega
+    #     mode: int, multipole mode l (>=2 here)
+    #     ustar_min, ustar_max: float, finite approximation of tortoise coordinate limits- paper uses [-50, 350]
+    #     N: int, number of product-integral subintervals (not grid points). Each interval samples A at five equally spaced nodes as in eq. (3.13)
 
-        Returns:
-            T: float, transmission probability i.e. GBF
-            alpha: complex, Bogoliubov coefficient alpha(x)
-            beta: complex, Bogoliubov coefficient beta(x)
-        
-        The Helton-Stuckwisch approximation computes the inverse transfer matrix H = [[alpha*, -beta*], [-beta, alpha]] so alpha = conj(H[0, 0]) and beta = -H[1, 0]
-    """
+    # Returns:
+    #     T: float, transmission probability i.e. GBF
+    #     alpha: complex, Bogoliubov coefficient alpha(x)
+    #     beta: complex, Bogoliubov coefficient beta(x)
+    
+    # The Helton-Stuckwisch approximation computes the inverse transfer matrix H = [[alpha*, -beta*], [-beta, alpha]] so alpha = conj(H[0, 0]) and beta = -H[1, 0]
+
     x = float(x)
     mode = int(mode)
     N = int(N)
@@ -1125,6 +1263,9 @@ os.makedirs(results_dir, exist_ok = True)
 os.makedirs(comparisons_dir, exist_ok = True)
 os.makedirs(final_plots_dir, exist_ok = True)
 os.makedirs(rar_dir, exist_ok = True)
+
+plot_amplitude_envelope_diagnostics(mass, mode, x_max, omega_min, omega_max)
+print(f"Saved static amplitude-envelope diagnostics to {diagnostic_dir}", flush=True)
 
 loss_history_dir = os.path.join(diagnostic_dir, "loss_history.csv")
 
