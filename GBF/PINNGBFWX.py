@@ -100,7 +100,6 @@ t.set_num_threads(1)
 print(f"Using device: {device}", flush = True)
 
 #Set up domain and BH mass
-epsilon = 1e-8
 # rstar_max = r_to_rstar(x_to_r(x_max, mass), mass)
 # rstar_max_tensor = t.tensor(rstar_max, requires_grad = True, dtype = DTYPE, device = device).view(-1, 1)
 
@@ -226,8 +225,16 @@ def static_solution_coeffs(mass, mode):
     norm = sum(a.values())
     return {k: v/norm for k, v in a.items()}
 
-static_coeffs = static_solution_coeffs(mass, mode)
-C_L = float(np.prod(np.arange(1, 2*mode + 2, 2)))**(1/(mode + 1)) #((2l+1)!!)^(1/(l+1))
+def amplitude_envelope(model, x, mass, mode, omega):
+    y = 1.0 - x
+    c_l = float(np.prod(np.arange(1, 2*mode + 2, 2)))**(1/(mode + 1)) #((2l+1)!!)^(1/(l+1)) constant in characteristic radius: epsilon = 2Momega/c_l
+    epsilon = 2*mass*omega/c_l
+
+    static_coeffs = static_solution_coeffs(mass, mode)
+    u_s = sum(c*y**(-k) for k, c in static_coeffs.items())
+    envelope = ((1.0 + epsilon**2)/(1.0 + (epsilon/y)**2))**(0.5(mode + 1))
+    gate = 1/(1.0 + (omega/t.exp(model.log_omega_b))**(2*(mode + 1)))
+    return t.exp(gate*t.log(u_s*envelope))
 
 #Flux loss annealing
 def annealing(epoch, total_epochs):
