@@ -1,3 +1,37 @@
+# PRE-TRAINING DIAGNOSTIC CHECKLIST TO BE IMPLEMENTED: STATIC AMPLITUDE ENVELOPE
+#
+# Before starting a long PINN training run, verify the envelope for the
+# selected mode l, mass M, frequency interval, and extraction coordinate.
+#
+# 1. STATIC SOLUTION COEFFICIENTS
+#    - Confirm the coefficients are finite and satisfy sum_k a_k = 1,
+#      so the normalized static solution obeys u_s(y=1) = 1.
+#    - Check known cases:
+#          l = 2: u_s(y) = y^(-3)
+#          l = 3: u_s(y) = 6*y^(-4) - 5*y^(-3)
+#    - Verify u_s(y) is finite and positive throughout
+#      y in [1 - x_extract, 1].
+#    - Be alert to cancellation and loss of precision at large l:
+#      the recurrence and direct polynomial evaluation are not guaranteed
+#      to be numerically stable for arbitrarily large l.
+#
+# 2. ENVELOPE LIMITS AND FINITENESS
+#    - Verify E(x=0, omega) = 1 at several positive frequencies.
+#    - Check that E(x, omega) is finite and positive over the full domain.
+#    - Check the low-frequency gate tends to 1 and the high-frequency
+#      gate tends to 0; inspect the crossover near M*omega_b.
+#    - Verify the far-zone taper F is finite and behaves as expected.
+#    - Check that the envelope and its spatial derivatives are finite.
+#
+# 3. PLOTS AND EFFECTIVE NEURAL CORRECTION
+#    - Inspect E(x, omega) and x^5*E(x, omega) at low, intermediate,
+#      and high training frequencies.
+#    - Check the effective prefactor does not become excessively large
+#      or small over the training domain.
+#    - Inspect the envelope components and frequency-gate plots.
+#
+# ============================================================================
+
 import torch as t
 import numpy as np 
 import matplotlib.pyplot as plt
@@ -28,12 +62,11 @@ parser = argparse.ArgumentParser(description = "Train PINN for specific mode l")
 parser.add_argument('--mass', type = float, required = True, help = "Black hole mass")
 parser.add_argument('--mode', type = int, required = True, help = 'The value of l (mode)')
 parser.add_argument('--x_extract', type = float, required = True, help = "GBF extraction coordinate")
-parser.add_argument('--omega_start', type = float, default = 0.3, help = 'Upper bound of frequency range')
-parser.add_argument('--omega_final', type = float, default = 0.03, help = 'Lower bound of frequency range')
+parser.add_argument('--omega_start', type = float, default = 1.2, help = 'Upper bound of frequency range')
+parser.add_argument('--omega_final', type = float, default = 0.01, help = 'Lower bound of frequency range')
 parser.add_argument('--query_steps', type = int, default = 200, help = 'Number of frequencies used for post-training numerical comparison')
 parser.add_argument('--adam_steps', type = int, default = 36000, help = "Number of Adam Epochs")
 parser.add_argument('--lbfgs_steps', type = int, default = 1000, help = 'Number of outer L-BFGS step calls')
-parser.add_argument('--curriculum_steps', type = int, default = 10, help = 'Number of steps taken in the frequency curriculum')
 parser.add_argument('--curriculum_start', type = float, default = 0.5, help = 'Fraction of omega_max from which the frequency curriculum starts')
 parser.add_argument('--lowfreq_weight', type = float, default = 1e-3, help = 'Weight of the asymptotic low=frequency GBF loss. Set to 0 to disable')
 parser.add_argument('--lowfreq_max_M_omega', type =  float, default = 0.1, help = 'Largest  M*omega for which the asymptotic GBF loss will be applied')
@@ -221,7 +254,7 @@ def taylor_coeffs(mass, mode, omega):
     c4 = ((Lambda + 21)*c3 - 5*c2)/(12 + 4*(1 - 1j*Omega))
     return c1.real, c1.imag, c2.real, c2.imag, c3.real, c3.imag, c4.real, c4.imag
 
-def static_solution_coeffs(mass, mode):
+def static_solution_coeffs(mode):
     #Horizon-regular static solution coefficients for the dimensionless spin-2 ODE with y = 1 - x = 2M/r and static wavefunction
     # u_s(y) = sum_{k = 3}^{l + 1} a_k y^{-k}. Coefficients normalised so that u_s(1) = 1 and coefficients are independent of mass.
     #A recurrence relation can be derived for the coefficients a_k.
@@ -247,7 +280,7 @@ def characteristic_radius_scale(mode):
     l = int(mode)
     return float(np.prod(np.arange(1, 2*mode + 2, 2)))**(1/(mode + 1))
 
-def amplitude_envelope(model, x, mass, mode, omega, return_components = False):
+def amplitude_envelope(x, mass, mode, omega, return_components = False):
     #E(x, omega) = [u_s(y)*F(y, omega)]**g(omega), y = 1 - x
     #with F = [(1 + epsilon**2)/(1 + (epsilon/y)**2)]**((l+1)/2), epsilon = 2Momega/c_l
     #and g is the frequency gate, g = 1/[1 + (M*omega/(M*omega_b))]**(2*(l+1))
@@ -261,13 +294,17 @@ def amplitude_envelope(model, x, mass, mode, omega, return_components = False):
         u_static = u_static + coeff*y.pow(-k)
 
     c_l = characteristic_radius_scale(mode)
-    epsilon = 2.0*mass*omega/c_l
+    epsilon = 2.0*mass*omega_tensor/c_l
 
-    far_factor = ((1.0 + epsilon**2)/(1.0 + (epsilon/y)**2))**(0.5*(mode + 1))
+    log_far = 0.5*(mode + 1)*(t.log1p(epsilon**2) - t.log1p((epsilon/y)**2))  
+    far_factor = t.exp(log_far)
 
     M_omega = mass*omega_tensor
-    gate = 1.0/(1.0 + (M_omega/ENVELOPE_M_OMEGA_B)**(2*(mode + 1)))
+    z = (M_omega/ENVELOPE_M_OMEGA_B).clamp_min(t.finfo(x.dtype).tiny)
+    gate = t.sigmoid(-2.0*(mode + 1)*t.log(z))
+    # gate = 1.0/(1.0 + (M_omega/ENVELOPE_M_OMEGA_B)**(2*(mode + 1)))
     raw_envelope = u_static*far_factor
+
     envelope = t.exp(gate*t.log(raw_envelope.clamp_min(t.finfo(x.dtype).tiny)))
 
     if return_components:
@@ -290,6 +327,16 @@ def numpy_envelope_components(x_values, omega_value, mass, mode):
     raw_envelope = u_static*far_factor
     envelope = np.exp(gate_value*np.log(np.maximum(raw_envelope, np.finfo(float).tiny)))
 
+    if not np.all(np.isfinite(u_static)) or np.any(u_static <= 0):
+            raise FloatingPointError(f"Static solution is non-finite or non-positive for mode={mode}")
+    
+    for name, values in {"u_static": u_static, "far_factor": far_factor, "raw_envelope": raw_envelope, "envelope": envelope}.items():
+        if not np.all(np.isfinite(values)):
+            raise FloatingPointError(f"{name} is non-finite for mode={mode}, omega={omega_value}")
+        
+        if np.any(values <= 0):
+            raise FloatingPointError(f"{name} is non-positive for mode={mode}, omega={omega_value}")
+
     return {"u_static": u_static, "far_factor": far_factor, "gate": np.full_like(x_values, gate_value), "raw_envelope": raw_envelope, "envelope": envelope, "correction_prefactor": x_values**5*envelope}
 
 def plot_amplitude_envelope_diagnostics(mass, mode, x_max, omega_min, omega_max):
@@ -299,11 +346,11 @@ def plot_amplitude_envelope_diagnostics(mass, mode, x_max, omega_min, omega_max)
     omega_values = np.array([omega_min, np.sqrt(omega_min*omega_max), omega_max])
     labels = [rf"$M \omega = {mass*om:.3g}$" for om in omega_values]
 
-    fig, axes = plt.subplot(1, 2, figsize = (13, 5))
+    fig, axes = plt.subplots(1, 2, figsize = (13, 5))
     for om, label in zip(omega_values, labels):
         comp = numpy_envelope_components(x_values, om, mass, mode)
-        axes[0].logy(x_values, comp["envelope"], label = label)
-        axes[1].logy(x_values, np.maximum(comp["correction_prefactor"], 1e-30), label = label)
+        axes[0].semilogy(x_values, comp["envelope"], label = label)
+        axes[1].semilogy(x_values, np.maximum(comp["correction_prefactor"], 1e-30), label = label)
     axes[0].set(xlabel = r"$x$", ylabel = r"$E(x, \omega)$", title = "Static Amplitude Envelope")
     axes[1].set(xlabel = r"$x$", ylabel = r"$x^5 E(x, \omega)$", title = "Effective NN-output pre-factor")
     for ax in axes:
@@ -325,7 +372,7 @@ def plot_amplitude_envelope_diagnostics(mass, mode, x_max, omega_min, omega_max)
     axes[-1].legend(fontsize = 8)
     fig.suptitle(rf"Envelope copmonts, $\ell = {mode}$")
     fig.tight_layout()
-    fig.savefig(os.path.join(diagnostic_dir, "amplitude_envelope_components"), format = 'png', dpi = 200)
+    fig.savefig(os.path.join(diagnostic_dir, "amplitude_envelope_components.png"), format = 'png', dpi = 200)
     plt.close(fig)
 
     Momega_line = np.logspace(np.log10(mass*omega_min), np.log10(mass*omega_max), 300)
@@ -1276,16 +1323,10 @@ with open(loss_history_dir, 'w', newline = '') as f:
 adam_iterations = args.adam_steps 
 lbfgs_iterations = args.lbfgs_steps
 
-learning_rate = 1e-3
-lr_min = 1e-6
-decay_start = int(0.3*adam_iterations)
-optimiser = optim.Adam(model.parameters(), lr = learning_rate)
-
 hist_epochs, hist_total, hist_flux, hist_lowfreq, hist_ode, hist_ode_re, hist_ode_im, hist_weight = [], [], [], [], [], [], [], []
 hist_grad_norm, hist_clipped = [], []
 diagnostic_model_states = []
 hist_learning_rate = []
-hist_curriculum_stage = []
 hist_omega_lower = []
 GBF, probability, alphas, betas, extraction_epochs = [], [], [], [], []
 
@@ -1312,24 +1353,138 @@ rar_omega = t.empty((0, 1), dtype = DTYPE, device = device)
 
 omega_low = args.curriculum_start*omega_max
 omega_prev = omega_low
-n_stages = min(args.curriculum_steps, adam_iterations)
-stage_lows = np.geomspace(omega_low, omega_min, n_stages)
 
-stage_edges = np.linspace(0, adam_iterations, n_stages + 1, dtype = int)
+# Global Adam learning-rate schedule.
+# Interpolate linearly in log10(learning rate) against normalised Adam progress.
+lr_progress = np.array([0.0, 0.10, 0.60, 1.0])
+lr_values = np.array([1e-3, 2e-4, 2e-5, 1e-6])
+optimiser = optim.Adam(model.parameters(), lr = float(lr_values[0]))
 
-run_config = {"arguments": vars(args),
-    "physical_parameters": {"mass": mass, "mode": mode, "x_extract": x_max, "omega_min": omega_min, "omega_max": omega_max},
-    "reproducibility": {"torch_seed": 0, "dtype": str(DTYPE), "device": str(device)},
-    "model": {"in_channels": 2, "out_channels": 4, "hidden_channels": 64, "hidden_layers": 3, "activation": "keerie_adaptive_tanh", "activation_n": 10.0, "ansatz_x_power": 5},
-    "sampling": {"base_points_per_adam_step": N_points, "x_uniform_fraction": 0.6, "x_beta_alpha": 0.6,
-        "x_beta_beta": 0.1, "omega_uniform_fraction": 0.6, "omega_beta_alpha": 0.6, "omega_beta_beta": 2.0, "omega_scaling": "fixed global logarithmic scaling"},
-    "curriculum": {"n_stages": int(n_stages), "stage_lower_bounds": stage_lows.tolist(), "stage_epoch_edges": stage_edges.tolist(), "initial_lower_bound": float(args.curriculum_start*omega_max)},
-    "adam": {"steps": adam_iterations, "learning_rate_initial": learning_rate, "learning_rate_minimum": lr_min, "learning_rate_schedule": "exponential in log space, restarted per stage", "max_gradient_norm": MAX_GRAD_NORM},
-    "lbfgs": {"outer_steps_requested": lbfgs_iterations, "max_iter": 20, "history_size": 50, "line_search_fn": "strong_wolfe", "resample_interval_outer_steps": LBFGS_RESAMPLE_INTERVAL},
-    "loss": {"flux_weight": 1.0},
-    "rar": {"interval": RAR_INTERVAL, "candidate_count": RAR_CANDIDATES, "points_added_per_refinement": RAR_ADD, "maximum_points": RAR_MAX, "minimum_joint_distance": RAR_MIN_JOINT_DISTANCE, "restart_after": RAR_RESTART_AFTER},
+lowfreq_loss_enabled = bool(
+    args.lowfreq_weight > 0 and lowfreq_omega.numel() > 0
+)
+
+if lowfreq_omega.numel() > 0:
+    lowfreq_omega_bounds = [
+        float(lowfreq_omega[0].item()),
+        float(lowfreq_omega[-1].item()),
+    ]
+else:
+    lowfreq_omega_bounds = None
+
+run_config = {
+    "arguments": vars(args),
+
+    "physical_parameters": {
+        "mass": mass,
+        "mode": mode,
+        "x_extract": x_max,
+        "omega_min": omega_min,
+        "omega_max": omega_max,
+    },
+
+    "reproducibility": {
+        "torch_seed": 0,
+        "dtype": str(DTYPE),
+        "device": str(device),
+    },
+
+    "model": {
+        "in_channels": 2,
+        "out_channels": 4,
+        "hidden_channels": 64,
+        "hidden_layers": 3,
+        "activation": "keerie_adaptive_tanh",
+        "activation_n": 10.0,
+        "ansatz_x_power": 5,
+    },
+
+    "ansatz_envelope": {
+        "enabled": True,
+        "type": "gated_static_solution_times_far_zone_taper",
+        "Momega_b_fixed": ENVELOPE_M_OMEGA_B,
+        "gate_exponent": int(2 * (mode + 1)),
+        "characteristic_radius_scale_C_l": characteristic_radius_scale(mode),
+        "static_solution_coefficients": {
+            str(k): float(v)
+            for k, v in static_solution_coeffs(mode).items()
+        },
+        "trainable": False,
+    },
+
+    "sampling": {
+        "base_points_per_adam_step": N_points,
+        "x_uniform_fraction": 0.6,
+        "x_beta_alpha": 0.6,
+        "x_beta_beta": 0.1,
+        "omega_uniform_fraction": 0.6,
+        "omega_beta_alpha": 0.6,
+        "omega_beta_beta": 2.0,
+        "omega_scaling": "fixed global logarithmic scaling",
+    },
+
+    "curriculum": {
+        "type": "global smoothstep transition in log-frequency",
+        "initial_lower_bound": float(args.curriculum_start * omega_max),
+        "transition_start_progress": 0.10,
+        "transition_end_progress": 0.60,
+        "final_lower_bound": omega_min,
+        "progress_definition": "epoch / (adam_steps - 1)",
+    },
+
+    "adam": {
+        "steps": adam_iterations,
+        "optimizer": "Adam",
+        "learning_rate_schedule": (
+            "piecewise log-linear interpolation over normalised Adam progress"
+        ),
+        "learning_rate_interpolation": "linear in log10(learning rate)",
+        "learning_rate_progress": lr_progress.tolist(),
+        "learning_rate_values": lr_values.tolist(),
+        "learning_rate_initial": float(lr_values[0]),
+        "learning_rate_final": float(lr_values[-1]),
+        "max_gradient_norm": MAX_GRAD_NORM,
+    },
+
+    "lbfgs": {
+        "outer_steps_requested": lbfgs_iterations,
+        "optimizer_learning_rate": 1.0,
+        "max_iter": 20,
+        "history_size": 50,
+        "line_search_fn": "strong_wolfe",
+        "resample_interval_outer_steps": LBFGS_RESAMPLE_INTERVAL,
+        "frequency_lower_bound": omega_min,
+        "frequency_upper_bound": omega_max,
+    },
+
+    "loss": {
+        "ode_weight": 1.0,
+        "flux_weight": 1.0,
+        "flux_weight_schedule": "constant",
+        "low_frequency_gbf": {
+            "enabled": lowfreq_loss_enabled,
+            "weight": float(args.lowfreq_weight),
+            "requested_max_Momega": float(args.lowfreq_max_M_omega),
+            "points_requested": int(args.lowfreq_points),
+            "points_in_grid": int(lowfreq_omega.numel()),
+            "omega_bounds": lowfreq_omega_bounds,
+            "target": "C_l * (M * omega) ** (2*l + 2)",
+            "loss": "mean squared difference of log GBF",
+        },
+    },
+
+    "rar": {
+        "interval": RAR_INTERVAL,
+        "candidate_count": RAR_CANDIDATES,
+        "points_added_per_refinement": RAR_ADD,
+        "maximum_points": RAR_MAX,
+        "minimum_joint_distance": RAR_MIN_JOINT_DISTANCE,
+        "restart_after": RAR_RESTART_AFTER,
+    },
+
     "query_steps": args.query_steps,
-    "diagnostic_omegas": diagnostic_omegas}
+    "diagnostic_omegas": diagnostic_omegas,
+}
 
 config_path = os.path.join(base_path, "config.json")
 with open(config_path, "w") as f:
@@ -1337,30 +1492,8 @@ with open(config_path, "w") as f:
 
 print(f"Saved run configuration to {config_path}", flush=True)
 
-lr_progress = np.array([0.0, 0.10, 0.60, 1.0])
-lr_values = np.array([1e-3, 2e-4, 2e-5, 1e-6])
-
 #Adam loop
 for epoch in range(adam_iterations):
-
-    stage = min(int(np.searchsorted(stage_edges[1:], epoch, side = "right")), n_stages - 1)
-    stage_start = int(stage_edges[stage])
-    stage_end = int(stage_edges[stage + 1])
-
-    if epoch == stage_start:
-        omega_low = float(stage_lows[stage])
-
-        rar_x = t.empty((0, 1), dtype = DTYPE, device = device)
-        rar_omega = t.empty((0, 1), dtype = DTYPE, device = device)
-        rar_full_epoch = None
-
-        print(f"Stage {stage + 1}/{n_stages}: omega range [{omega_low:.6f}, {omega_max:.6f}]", flush = True)
-
-        new_rar_x, new_rar_omega, new_rar_scores = select_rar_joint_points(model = model, n_candidates = RAR_CANDIDATES, n_add = min(RAR_ADD, RAR_MAX), x_max = x_max, mass = mass, mode = mode, device = device, dtype = DTYPE, existing_rar_x = rar_x,
-                    existing_rar_omega = rar_omega, min_joint_distance = RAR_MIN_JOINT_DISTANCE, omega_lower = omega_low)
-
-        rar_x = t.cat([rar_x, new_rar_x], dim = 0)
-        rar_omega  = t.cat([rar_omega, new_rar_omega], dim = 0)
 
     progress = epoch/max(adam_iterations - 1, 1)
     omega_initial = args.curriculum_start*omega_max
@@ -1369,11 +1502,6 @@ for epoch in range(adam_iterations):
     omega_low = np.exp((1.0 - expansion)*np.log(omega_initial) + expansion*np.log(omega_min))
 
     learning_rate_used = 10.0**np.interp(progress, lr_progress, np.log10(lr_values))
-
-    # stage_progress = (epoch - stage_start)/max(1, stage_end - stage_start - 1)
-    # stage_progress = float(np.clip(stage_progress, 0.0, 1.0))
-
-    # learning_rate_used = learning_rate*(lr_min/learning_rate)**stage_progress
 
     for group in optimiser.param_groups:
         group["lr"] = learning_rate_used
@@ -1413,7 +1541,6 @@ for epoch in range(adam_iterations):
     hist_ode_re.append(loss_ode_real.item())
     hist_ode_im.append(loss_ode_imag.item())
     hist_learning_rate.append(float(learning_rate_used))
-    hist_curriculum_stage.append(int(stage))
     hist_omega_lower.append(float(omega_low))
 
     if (epoch + 1) % 100 == 0 or epoch == 0 or epoch == (adam_iterations - 1):
@@ -1510,7 +1637,6 @@ atomic_torch_save({
         "flux_loss": [float(v) for v in hist_flux],
         "lowfreq_loss": [float(v) for v in hist_lowfreq],
         "learning_rate": hist_learning_rate,
-        "curriculum_stage": hist_curriculum_stage,
         "omega_lower": hist_omega_lower,
         "grad_norm_preclip": hist_grad_norm,
         "gradient_clipped": [bool(v) for v in hist_clipped]},
@@ -1655,7 +1781,6 @@ final_model_checkpoint = {
     "rar_points": {"x": rar_x.detach().cpu(),
         "omega": rar_omega.detach().cpu()},
         "adam_learning_rate": hist_learning_rate,
-        "adam_curriculum_stage": hist_curriculum_stage,
         "adam_omega_lower": hist_omega_lower,
         "adam_grad_norm_preclip": hist_grad_norm,
         "adam_gradient_clipped": [bool(v) for v in hist_clipped],
@@ -1876,8 +2001,29 @@ checkpoint = {'model_state_dict': model.state_dict(),
             'adam_iterations': adam_iterations,
             'lbfgs_iterations': lbfgs_iterations,
 
-            'flux_weight_initial': 1.0,
-            'flux_weight_final': 1.0,
+            'loss_config': {
+                    'ode_weight': 1.0,
+                    'flux_weight': 1.0,
+                    'flux_weight_schedule': 'constant',
+                    'low_frequency_gbf_weight': float(args.lowfreq_weight),
+                    'low_frequency_gbf_enabled': lowfreq_loss_enabled,
+                    'low_frequency_gbf_points': int(lowfreq_omega.numel()),
+                    'low_frequency_gbf_omega_bounds': lowfreq_omega_bounds,
+                },
+                'adam_learning_rate_schedule': {
+                    'type': 'piecewise log-linear',
+                    'progress': lr_progress.tolist(),
+                    'learning_rate_values': lr_values.tolist(),
+                    'initial': float(lr_values[0]),
+                    'final': float(lr_values[-1]),
+                },
+                'frequency_curriculum': {
+                    'type': 'global smoothstep transition in log-frequency',
+                    'initial_lower_bound': float(args.curriculum_start * omega_max),
+                    'transition_start_progress': 0.10,
+                    'transition_end_progress': 0.60,
+                    'final_lower_bound': omega_min,
+                },
 
             'rar_points': {'x': rar_x.detach().cpu(), 'omega': rar_omega.detach().cpu()},
 
@@ -1905,7 +2051,6 @@ checkpoint["model_state_dict"] = get_cpu_model_state(model)
 checkpoint["config"] = run_config
 checkpoint["training_history"].update({
     "adam_learning_rate": hist_learning_rate,
-    "adam_curriculum_stage": hist_curriculum_stage,
     "adam_omega_lower": hist_omega_lower,
     "adam_grad_norm_preclip": hist_grad_norm,
     "adam_gradient_clipped": [bool(v) for v in hist_clipped],
@@ -1925,7 +2070,7 @@ PI_T_list = []
 PI_unitarity_list = []
 
 for x in Momega_values:
-    T_PI, alpha_PI, beta_PI = product_integral_GBF(x, mode = mode, ustar_max = 350.0, N = 20000)
+    T_PI, alpha_PI, beta_PI = product_integral_GBF(x, mode = mode, ustar_max = 350.0, N = 10000)
     PI_T_list.append(T_PI)
     unitarity = np.abs(alpha_PI)**2 - np.abs(beta_PI)**2
     PI_unitarity_list.append(unitarity)
@@ -2013,7 +2158,7 @@ plt.grid()
 plt.legend()
 plt.tight_layout()
 plt.savefig(os.path.join(comparisons_dir, "Full_GBF_comparison.png"), format = 'png', dpi = 200)
-plt.close(fig)
+plt.close()
 
 convergence_results = product_integral_convergence(
     x=0.2,              # M*omega
