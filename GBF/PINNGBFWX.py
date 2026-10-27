@@ -42,7 +42,6 @@ import torch.distributions as dist
 import os
 import argparse
 from matplotlib import rc
-import bisect
 import csv
 import json
 from datetime import datetime
@@ -724,6 +723,8 @@ def compute_lowfreq_gbf_loss(model, mass, mode):
 
     return t.mean((log_pred - log_target)**2)
 
+delta = 1e-12
+
 #Current loss function composed of ODE residual and Flux conservation requirement
 def compute_loss(model, x_tensor, mass, mode, omega, flux_weight):
 
@@ -740,9 +741,11 @@ def compute_loss(model, x_tensor, mass, mode, omega, flux_weight):
     res_ode_re = (A_*d2u_re + B_re*du_re - B_im*du_im + C_*u_re)
     res_ode_im = (A_*d2u_im + B_im*du_re + B_re*du_im + C_*u_im)
 
-    loss_ode_re = t.mean(res_ode_re**2)
-    loss_ode_im = t.mean(res_ode_im**2)
-    loss_ode = loss_ode_re + loss_ode_im
+    env = amplitude_envelope(x_tensor, mass, mode, omega)
+
+    loss_ode_re = t.mean(res_ode_re**2/(env**2 + delta))
+    loss_ode_im = t.mean(res_ode_im**2/(env**2 + delta))
+    loss_ode = (loss_ode_re + loss_ode_im)
 
     #Flux conservation- included to prevent the network from setting u = 0
     J = g(x_tensor, mass)*(u_re*du_im - u_im*du_re) - omega*(u_re**2 + u_im**2 - 1) # should = 0 analytically
@@ -2162,7 +2165,7 @@ plt.close()
 
 convergence_results = product_integral_convergence(
     x=0.2,              # M*omega
-    mode=2,
+    mode= mode,
     N_values=(1000, 2000, 4000, 8000),
     ustar_min=-50.0,
     ustar_max=350.0,
