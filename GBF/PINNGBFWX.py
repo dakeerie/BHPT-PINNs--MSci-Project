@@ -282,7 +282,7 @@ def characteristic_radius_scale(mode):
 def amplitude_envelope(x, mass, mode, omega, return_components = False):
     #E(x, omega) = [u_s(y)*F(y, omega)]**g(omega), y = 1 - x
     #with F = [(1 + epsilon**2)/(1 + (epsilon/y)**2)]**((l+1)/2), epsilon = 2Momega/c_l
-    #and g is the frequency gate, g = 1/[1 + (M*omega/(M*omega_b))]**(2*(l+1))
+    #and g is the frequency gate, g = 1/[1 + (M*omega/(M*omega_b))**(2*(l+1))]
     #Envelope E(x, omega) constructed so that it smoothes the near and far zone static solutions together- derived by asymptotic matching of these two regions.
     #E(0, omega) = 1 and E(x, omega) multiplies only the x^5 neural correctino so the prescribed horizon Taylor coefficients remain unchanged.
     omega_tensor = prepare_omega_tensor(omega, x)
@@ -369,7 +369,7 @@ def plot_amplitude_envelope_diagnostics(mass, mode, x_max, omega_min, omega_max)
         ax.set(xlabel = r"$x$", ylabel = ylabel, title = title)
         ax.grid(True)
     axes[-1].legend(fontsize = 8)
-    fig.suptitle(rf"Envelope copmonts, $\ell = {mode}$")
+    fig.suptitle(rf"Envelope components, $\ell = {mode}$")
     fig.tight_layout()
     fig.savefig(os.path.join(diagnostic_dir, "amplitude_envelope_components.png"), format = 'png', dpi = 200)
     plt.close(fig)
@@ -417,6 +417,34 @@ def plot_amplitude_envelope_diagnostics(mass, mode, x_max, omega_min, omega_max)
                     f"{comp['gate'][j]:.12e}", f"{comp['envelope'][j]:.12e}",
                     f"{comp['correction_prefactor'][j]:.12e}",
                 ])
+
+def run_envelope_self_checks(mass, mode, x_max, tol = 1e-10):
+    coeffs = static_solution_coeffs(mode)
+    assert abs(sum(coeffs.values()) - 1.0) < 1e-12
+    if mode == 2: assert set(coeffs) == {3} and abs(coeffs[3] - 1.0) < 1e-12
+    if mode == 3: assert abs(coeffs[4] - 6.0) < 1e-10 and abs(coeffs[3] + 5.0) < 1e-10
+
+    x = t.linspace(0.05, x_max, 25, dtype = DTYPE, device = device).reshape(-1, 1).requires_grad_(True)
+    u = sum(c*(1.0 - x).pow(-k) for k, c in coeffs.items())
+    du, d2u = grads(u, x)
+    Bre = (1 - x)*(1 - 3*x)
+    res = A(x)*d2u + Bre*du + C(x, mode)*u
+    scale = A(x)*d2u.abs() + Bre.abs()*du.abs() + C(x, mode).abs()*u.abs()
+    rel = (res.abs()/scale).max().item()
+    assert rel < tol, f"Static solution fails the omega = 0 ODE (max relative residual {rel:.2e})"
+
+    x0 = t.zeros((1, 1), dtype = DTYPE, device = device)
+    xs = t.linspace(1e-3, x_max, 200, dtype = DTYPE, device = device).reshape(-1, 1).requires_grad_(True)
+    for Mw in [0.01, 0.1, 1.0]:
+        assert abs(amplitude_envelope(x0, mass, mode, Mw/mass).item() - 1.0) < 1e-12 #E(0, omega) = 1
+        E = amplitude_envelope(xs, mass, mode, Mw/mass)
+        dE = t.autograd.grad(E.sum(), xs)[0]
+        assert t.isfinite(E).all() and (E > 0).all() and t.isfinite(dE).all()
+    _, lo = amplitude_envelope(xs, mass, mode, 1e-2*ENVELOPE_M_OMEGA_B/mass, return_components = True)
+    _, hi = amplitude_envelope(xs, mass, mode, 1e2*ENVELOPE_M_OMEGA_B/mass, return_components = True)
+    assert lo["gate"].min() > 0.999 and hi["gate"].max() < 1e-3
+    print(f"Envelope self-checks passed (static-ODE max relative residual {rel:.1e})")
+
 
 #Flux loss annealing
 def annealing(epoch, total_epochs):
@@ -524,7 +552,10 @@ def ode_residual_score(model, x_tensor, mass, mode,  omega, chunk_size = 2000):
 
         res_re = A_*d2u_re + B_re*du_re - B_im*du_im + C_*u_re
         res_im = A_*d2u_im + B_im*du_re + B_re*du_im + C_*u_im
-        score = (res_re**2 + res_im**2).flatten().detach()
+
+        env = amplitude_envelope(x_chunk, mass, mode, omega_chunk)
+        normalise = 1.0/(env**2 + delta)
+        score = ((res_re**2 + res_im**2)*normalise).flatten().detach()
 
         scores.append(score)
 
@@ -554,9 +585,13 @@ def residual_fields(model, x_tensor, mass, mode, omega, chunk_size = 2000):
         res_re = A_*d2u_re + B_re*du_re - B_im*du_im + C_*u_re
         res_im = A_*d2u_im + B_re*du_im + B_im*du_re +C_*u_im
 
-        ode_squared = res_re**2 + res_im**2
+        env = amplitude_envelope(x_chunk, mass, mode, omega_chunk)
+        normalise = 1.0/(env**2 + delta)
 
-        J = g(x_chunk, mass)*(u_re*du_im - u_im*du_re) - omega_chunk*(u_re**2 + u_im**2 - 1)
+        ode_squared = (res_re**2 + res_im**2)*normalise
+
+        J_raw = g(x_chunk, mass)*(u_re*du_im - u_im*du_re) - omega_chunk*(u_re**2 + u_im**2 - 1)
+        J = J_raw/(omega_chunk*(1.0 + u_re**2 + u_im**2).detach())
 
         ode_squared_chunks.append(ode_squared.flatten().detach())
         flux_chunks.append(J.flatten().detach())
@@ -748,7 +783,8 @@ def compute_loss(model, x_tensor, mass, mode, omega, flux_weight):
     loss_ode = (loss_ode_re + loss_ode_im)
 
     #Flux conservation- included to prevent the network from setting u = 0
-    J = g(x_tensor, mass)*(u_re*du_im - u_im*du_re) - omega*(u_re**2 + u_im**2 - 1) # should = 0 analytically
+    J_raw = g(x_tensor, mass)*(u_re*du_im - u_im*du_re) - omega*(u_re**2 + u_im**2 - 1) # should = 0 analytically
+    J = J_raw/(omega*(1.0 + u_re**2 + u_im**2).detach())
     loss_flux = t.mean(J**2)
 
     active = lowfreq_omega[:, 0] >= omega_low
