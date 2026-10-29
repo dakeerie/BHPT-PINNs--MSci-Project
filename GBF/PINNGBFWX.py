@@ -71,6 +71,7 @@ parser.add_argument('--lowfreq_weight', type = float, default = 1e-3, help = 'We
 parser.add_argument('--lowfreq_max_M_omega', type =  float, default = 0.1, help = 'Largest  M*omega for which the asymptotic GBF loss will be applied')
 parser.add_argument('--lowfreq_points', type = int, default = 64, help = 'Number of fixed log-spaced frequencies for the low-frequency GBF loss')
 parser.add_argument('--envelope_M_omega_b', type = float, default = 0.1, help = 'Fixed dimensionless crossover M*omega_b for the static amplitude envelope (frequency gate); not currently trainable')
+parser.add_argument('--ode_norm', choices = ['env', 'self', 'none'], default = 'none', help = 'Choose ODE loss term normalisation. Options are: none, self, env')
 
 args = parser.parse_args()
 mass = args.mass
@@ -760,6 +761,10 @@ def compute_lowfreq_gbf_loss(model, mass, mode):
 
 delta = 1e-12
 
+def ode_normalisation(env, A_, B_re, B_im, C_, u_re, u_im, du_re, du_im, d2u_re, d2u_im):
+    if args.ode_norm == 'env':
+        return env**2 + delta
+
 #Current loss function composed of ODE residual and Flux conservation requirement
 def compute_loss(model, x_tensor, mass, mode, omega, flux_weight):
 
@@ -778,14 +783,23 @@ def compute_loss(model, x_tensor, mass, mode, omega, flux_weight):
 
     env = amplitude_envelope(x_tensor, mass, mode, omega)
 
-    loss_ode_re = t.mean(res_ode_re**2/(env**2 + delta))
-    loss_ode_im = t.mean(res_ode_im**2/(env**2 + delta))
-    loss_ode = (loss_ode_re + loss_ode_im)
-
     #Flux conservation- included to prevent the network from setting u = 0
     J_raw = g(x_tensor, mass)*(u_re*du_im - u_im*du_re) - omega*(u_re**2 + u_im**2 - 1) # should = 0 analytically
     J = J_raw/(omega*(1.0 + u_re**2 + u_im**2).detach())
     loss_flux = t.mean(J**2)
+
+    if args.ode_norm == 'env':
+        loss_ode_re = t.mean(res_ode_re**2/(env**2 + delta))
+        loss_ode_im = t.mean(res_ode_im**2/(env**2 + delta))
+        loss_ode = loss_ode_re + loss_ode_im
+
+    if args.ode_norm == 'self':
+        loss_ode = t.mean((res_ode_re**2 + res_ode_im**2)/((A_*t.complex(d2u_re, d2u_im, dtype = DTYPE) + t.complex(B_re, B_im, dtype = DTYPE)*t.complex(du_re, du_im) + C_*t.complex(u_re, u_im) + delta).detach())**2)
+
+    if args.ode_norm == 'none':
+        loss_ode = t.mean(res_ode_re**2 + res_ode_im**2)
+        J = g(x_tensor, mass)*(u_re*du_im - u_im*du_re) - omega*(u_re**2 + u_im**2 - 1) # should = 0 analytically
+        loss_flux = t.mean(J**2)
 
     active = lowfreq_omega[:, 0] >= omega_low
 
