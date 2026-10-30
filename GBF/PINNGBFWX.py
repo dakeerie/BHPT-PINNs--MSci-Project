@@ -117,12 +117,17 @@ if not (1e-6 < x_max <= 1.0 - 1e-3):
 if args.envelope_M_omega_b <= 0:
     raise ValueError("envelope_M_omega_b must be positive.")
 
+
+
 #Frequency schedule from high to low for continuation
 omega_min = float(args.omega_final)
 omega_max = float(args.omega_start)
 diagnostic_omegas = [omega_min, 0.5*(omega_min + omega_max), float(omega_max)]
 monitor_omega = diagnostic_omegas[1]
 x_diagnostic = np.linspace(1e-6, x_max, 5000)
+
+if not (omega_min/omega_max <= args.curriculum_start <= 1.0):
+    raise ValueError("curriculum_start must give an initial lower bound between omega_final and omega_start.")
 
 # mode = 2
 # omega = 0.3
@@ -296,6 +301,7 @@ def amplitude_envelope(x, mass, mode, omega, return_components = False):
     c_l = characteristic_radius_scale(mode)
     epsilon = 2.0*mass*omega_tensor/c_l
 
+    #Far factor F(x)
     log_far = 0.5*(mode + 1)*(t.log1p(epsilon**2) - t.log1p((epsilon/y)**2))  
     far_factor = t.exp(log_far)
 
@@ -390,7 +396,7 @@ def plot_amplitude_envelope_diagnostics(mass, mode, x_max, omega_min, omega_max)
     axes[0].legend()
     axes[1].loglog(Momega_line, envelope_extract, label=r"$E(x_{\max},\omega)$")
     axes[1].loglog(Momega_line, np.maximum(prefactor_extract, 1e-300), label=r"$x_{\max}^5 E(x_{\max},\omega)$")
-    axes[1].set(xlabel=r"$M\omega$", ylabel="Envelope / prefactor", title="At extraction coordinate")
+    axes[1].set(xlabel = r"$M\omega$", ylabel="Envelope/prefactor", title="At extraction coordinate")
     axes[1].legend()
     for ax in axes:
         ax.grid(True, which="both", alpha=0.3)
@@ -555,8 +561,8 @@ def ode_residual_score(model, x_tensor, mass, mode,  omega, chunk_size = 2000):
         res_im = A_*d2u_im + B_im*du_re + B_re*du_im + C_*u_im
 
         env = amplitude_envelope(x_chunk, mass, mode, omega_chunk)
-        normalise = 1.0/(env**2 + delta)
-        score = ((res_re**2 + res_im**2)*normalise).flatten().detach()
+        normaliser = res_normalisation(env, A_, B_re, B_im, C_, u_re, u_im, du_re, du_im, d2u_re, d2u_im, omega_chunk)
+        score = ((res_re**2 + res_im**2)/normaliser[0]).flatten().detach()
 
         scores.append(score)
 
@@ -587,12 +593,12 @@ def residual_fields(model, x_tensor, mass, mode, omega, chunk_size = 2000):
         res_im = A_*d2u_im + B_re*du_im + B_im*du_re +C_*u_im
 
         env = amplitude_envelope(x_chunk, mass, mode, omega_chunk)
-        normalise = 1.0/(env**2 + delta)
+        normaliser = res_normalisation(env, A_, B_re, B_im, C_, u_re, u_im, du_re, du_im, d2u_re, d2u_im, omega_chunk)
 
-        ode_squared = (res_re**2 + res_im**2)*normalise
+        ode_squared = (res_re.square() + res_im.square())/normaliser[0]
 
         J_raw = g(x_chunk, mass)*(u_re*du_im - u_im*du_re) - omega_chunk*(u_re**2 + u_im**2 - 1)
-        J = J_raw/(omega_chunk*(1.0 + u_re**2 + u_im**2).detach())
+        J = J_raw/normaliser[1]
 
         ode_squared_chunks.append(ode_squared.flatten().detach())
         flux_chunks.append(J.flatten().detach())
@@ -761,9 +767,13 @@ def compute_lowfreq_gbf_loss(model, mass, mode):
 
 delta = 1e-12
 
-def ode_normalisation(env, A_, B_re, B_im, C_, u_re, u_im, du_re, du_im, d2u_re, d2u_im):
+def res_normalisation(env, A_, B_re, B_im, C_, u_re, u_im, du_re, du_im, d2u_re, d2u_im, omega):
     if args.ode_norm == 'env':
-        return env**2 + delta
+        return env**2 + delta, env**2 + delta
+    if args.ode_norm == 'none':
+        return 1.0, 1.0
+    if args.ode_norm == 'self':
+        return ((A_**2*(d2u_re**2 + d2u_im**2) + (B_re**2 + B_im**2)*(du_re**2 + du_im**2) + C_**2*(u_re**2 + u_im**2)).detach() + delta).detach(), omega*(1.0 + u_re**2 + u_im**2).detach()
 
 #Current loss function composed of ODE residual and Flux conservation requirement
 def compute_loss(model, x_tensor, mass, mode, omega, flux_weight):
@@ -783,23 +793,17 @@ def compute_loss(model, x_tensor, mass, mode, omega, flux_weight):
 
     env = amplitude_envelope(x_tensor, mass, mode, omega)
 
+    normaliser = res_normalisation(env, A_, B_re, B_im, C_, u_re, u_im, du_re, du_im, d2u_re, d2u_im, omega)
+
     #Flux conservation- included to prevent the network from setting u = 0
     J_raw = g(x_tensor, mass)*(u_re*du_im - u_im*du_re) - omega*(u_re**2 + u_im**2 - 1) # should = 0 analytically
-    J = J_raw/(omega*(1.0 + u_re**2 + u_im**2).detach())
+    J = J_raw/normaliser[1]
     loss_flux = t.mean(J**2)
 
-    if args.ode_norm == 'env':
-        loss_ode_re = t.mean(res_ode_re**2/(env**2 + delta))
-        loss_ode_im = t.mean(res_ode_im**2/(env**2 + delta))
-        loss_ode = loss_ode_re + loss_ode_im
+    loss_ode_re = t.mean(res_ode_re.square()/normaliser[0])
+    loss_ode_im = t.mean(res_ode_im.square()/normaliser[0])
 
-    if args.ode_norm == 'self':
-        loss_ode = t.mean((res_ode_re**2 + res_ode_im**2)/((A_*t.complex(d2u_re, d2u_im, dtype = DTYPE) + t.complex(B_re, B_im, dtype = DTYPE)*t.complex(du_re, du_im) + C_*t.complex(u_re, u_im) + delta).detach())**2)
-
-    if args.ode_norm == 'none':
-        loss_ode = t.mean(res_ode_re**2 + res_ode_im**2)
-        J = g(x_tensor, mass)*(u_re*du_im - u_im*du_re) - omega*(u_re**2 + u_im**2 - 1) # should = 0 analytically
-        loss_flux = t.mean(J**2)
+    loss_ode = loss_ode_re + loss_ode_im
 
     active = lowfreq_omega[:, 0] >= omega_low
 
@@ -1365,6 +1369,7 @@ os.makedirs(final_plots_dir, exist_ok = True)
 os.makedirs(rar_dir, exist_ok = True)
 
 plot_amplitude_envelope_diagnostics(mass, mode, x_max, omega_min, omega_max)
+run_envelope_self_checks(mass, mode, x_max)
 print(f"Saved static amplitude-envelope diagnostics to {diagnostic_dir}", flush=True)
 
 loss_history_dir = os.path.join(diagnostic_dir, "loss_history.csv")
@@ -1982,6 +1987,12 @@ plt.close()
 
 final_alpha, final_beta, final_prob, final_gbf = extraction(model, x_max, mass, mode, monitor_omega)
 
+if not np.isfinite(final_alpha) or abs(final_alpha) == 0:
+    raise FloatingPointError(f"Invalide final alpha at omega = {monitor_omega}: {final_alpha}")
+
+if not np.isfinite(final_beta):
+    raise FloatingPointError(f"Invalid final beta at omega = {monitor_omega}: {final_beta}")
+
 T = 1/final_alpha
 R = final_beta/final_alpha
 
@@ -1989,6 +2000,15 @@ final_loss_data = compute_loss(model, x_tensor_lbfgs, mass, mode, omega_tensor_l
 _, _, _, final_total_loss, final_flux_loss, final_lowfreq_loss, final_ode_loss, _, _, *_ = final_loss_data
 
 query_relative_finite = query_relative_differences[np.isfinite(query_relative_differences)]
+
+if query_relative_finite.size > 0:
+    query_mean_relative_error = np.mean(query_relative_finite)
+    query_max_relative_error = np.max(query_relative_finite)
+
+else:
+    query_mean_relative_error = np.nan
+    query_max_relative_error = np.nan
+    print("Warning: No finite relative errors available.")
 
 result_file_path = os.path.join(results_dir, 'result.txt')
 
@@ -2027,8 +2047,8 @@ with open(result_file_path, 'w') as f:
     f.write(f"mid_frequency_prob = {final_prob:.12e}\n")
     f.write(f"monitor_frequency_GBF = {final_gbf:.12e}\n")
 
-    f.write(f"query_mean_relative_error = {np.mean(query_relative_finite):.12e}\n")
-    f.write(f"query_max_relative_error = {np.max(query_relative_finite):.12e}\n")
+    f.write(f"query_mean_relative_error = {query_mean_relative_error:.12e}\n")
+    f.write(f"query_max_relative_error = {query_max_relative_error:.12e}\n")
 
     f.write(f"lbfgs_success = {lbfgs_success}\n")
 
