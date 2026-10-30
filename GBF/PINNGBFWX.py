@@ -117,8 +117,6 @@ if not (1e-6 < x_max <= 1.0 - 1e-3):
 if args.envelope_M_omega_b <= 0:
     raise ValueError("envelope_M_omega_b must be positive.")
 
-
-
 #Frequency schedule from high to low for continuation
 omega_min = float(args.omega_final)
 omega_max = float(args.omega_start)
@@ -852,8 +850,19 @@ def extraction(model, x_extraction, mass, mode, omega):
     D = 1j*Omega/(y_extraction**2*x_extraction) + np.conj(du1/u1)
     numerator = u_max - du_max/D
     denominator = u1 - du1/D
+
+    if not np.isfinite(denominator) or abs(denominator) == 0:
+        raise FloatingPointError(f"Invalid extraction denominator at omega={omega}")
+
     alpha = numerator/denominator
+
+    if not np.isfinite(alpha) or abs(alpha) == 0:
+        raise FloatingPointError(f"Invalid alpha at omega={omega}: {alpha}")
+
     beta = (u_max - alpha*u1)/(np.exp(1j*2*omega*rstar_extraction)*np.conj(u1))
+
+    if not np.isfinite(beta):
+        raise FloatingPointError(f"Invalid beta at omega={omega}: {beta}")
 
     #Not technically a probability but instead related to the Wronskian and flux conservation at the extraction point
     prob = np.abs(alpha)**2 - np.abs(beta)**2
