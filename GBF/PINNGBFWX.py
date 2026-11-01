@@ -1049,7 +1049,9 @@ def save_training_diagnostics(model, epoch_number, omega):
     plt.yscale('log')
     plt.xlabel('Epoch', fontsize = 16)
     plt.ylabel('Loss', fontsize = 16)
-    plt.title(f'Two-input PINN loss, l = {mode}', fontsize = 16)
+    plt.title(f'Two-input PINN loss, l = {mode}'
+            '\n'
+            f'Residual Normalisation: {args.res_norm}', fontsize = 16)
     plt.grid()
     plt.legend()
     plt.tight_layout()
