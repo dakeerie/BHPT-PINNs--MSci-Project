@@ -71,7 +71,7 @@ parser.add_argument('--lowfreq_weight', type = float, default = 1e-3, help = 'We
 parser.add_argument('--lowfreq_max_M_omega', type =  float, default = 0.1, help = 'Largest  M*omega for which the asymptotic GBF loss will be applied')
 parser.add_argument('--lowfreq_points', type = int, default = 64, help = 'Number of fixed log-spaced frequencies for the low-frequency GBF loss')
 parser.add_argument('--envelope_M_omega_b', type = float, default = 0.1, help = 'Fixed dimensionless crossover M*omega_b for the static amplitude envelope (frequency gate); not currently trainable')
-parser.add_argument('--ode_norm', choices = ['env', 'self', 'none'], default = 'none', help = 'Choose ODE loss term normalisation. Options are: none, self, env')
+parser.add_argument('--res_norm', choices = ['env', 'self', 'none'], default = 'none', help = 'Choose ODE and flux residual loss term normalisation. Options are: none, self, env')
 
 args = parser.parse_args()
 mass = args.mass
@@ -766,11 +766,11 @@ def compute_lowfreq_gbf_loss(model, mass, mode):
 delta = 1e-12
 
 def res_normalisation(env, A_, B_re, B_im, C_, u_re, u_im, du_re, du_im, d2u_re, d2u_im, omega):
-    if args.ode_norm == 'env':
+    if args.res_norm == 'env':
         return env**2 + delta, env**2 + delta
-    if args.ode_norm == 'none':
+    if args.res_norm == 'none':
         return 1.0, 1.0
-    if args.ode_norm == 'self':
+    if args.res_norm == 'self':
         return ((A_**2*(d2u_re**2 + d2u_im**2) + (B_re**2 + B_im**2)*(du_re**2 + du_im**2) + C_**2*(u_re**2 + u_im**2)).detach() + delta).detach(), omega*(1.0 + u_re**2 + u_im**2).detach()
 
 #Current loss function composed of ODE residual and Flux conservation requirement
