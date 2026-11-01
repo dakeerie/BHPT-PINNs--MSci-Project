@@ -1,0 +1,131 @@
+{
+  "arguments": {
+    "mass": 0.5,
+    "mode": 2,
+    "x_extract": 0.99,
+    "omega_start": 1.2,
+    "omega_final": 0.01,
+    "query_steps": 200,
+    "adam_steps": 36000,
+    "lbfgs_steps": 5000,
+    "curriculum_start": 0.5,
+    "lowfreq_weight": 0.001,
+    "lowfreq_max_M_omega": 0.04,
+    "lowfreq_points": 64,
+    "envelope_M_omega_b": 0.1,
+    "res_norm": "env"
+  },
+  "physical_parameters": {
+    "mass": 0.5,
+    "mode": 2,
+    "x_extract": 0.99,
+    "omega_min": 0.01,
+    "omega_max": 1.2
+  },
+  "reproducibility": {
+    "torch_seed": 0,
+    "dtype": "torch.float64",
+    "device": "cpu"
+  },
+  "model": {
+    "in_channels": 2,
+    "out_channels": 4,
+    "hidden_channels": 64,
+    "hidden_layers": 3,
+    "activation": "keerie_adaptive_tanh",
+    "activation_n": 10.0,
+    "ansatz_x_power": 5
+  },
+  "ansatz_envelope": {
+    "enabled": true,
+    "type": "gated_static_solution_times_far_zone_taper",
+    "Momega_b_fixed": 0.1,
+    "gate_exponent": 6,
+    "characteristic_radius_scale_C_l": 2.46621207433047,
+    "static_solution_coefficients": {
+      "3": 1.0
+    },
+    "trainable": false
+  },
+  "sampling": {
+    "base_points_per_adam_step": 10000,
+    "x_uniform_fraction": 0.6,
+    "x_beta_alpha": 0.6,
+    "x_beta_beta": 0.1,
+    "omega_uniform_fraction": 0.6,
+    "omega_beta_alpha": 0.6,
+    "omega_beta_beta": 2.0,
+    "omega_scaling": "fixed global logarithmic scaling"
+  },
+  "curriculum": {
+    "type": "global smoothstep transition in log-frequency",
+    "initial_lower_bound": 0.6,
+    "transition_start_progress": 0.1,
+    "transition_end_progress": 0.6,
+    "final_lower_bound": 0.01,
+    "progress_definition": "epoch / (adam_steps - 1)"
+  },
+  "adam": {
+    "steps": 36000,
+    "optimizer": "Adam",
+    "learning_rate_schedule": "piecewise log-linear interpolation over normalised Adam progress",
+    "learning_rate_interpolation": "linear in log10(learning rate)",
+    "learning_rate_progress": [
+      0.0,
+      0.1,
+      0.6,
+      1.0
+    ],
+    "learning_rate_values": [
+      0.001,
+      0.0002,
+      2e-05,
+      1e-06
+    ],
+    "learning_rate_initial": 0.001,
+    "learning_rate_final": 1e-06,
+    "max_gradient_norm": 10.0
+  },
+  "lbfgs": {
+    "outer_steps_requested": 5000,
+    "optimizer_learning_rate": 1.0,
+    "max_iter": 20,
+    "history_size": 50,
+    "line_search_fn": "strong_wolfe",
+    "resample_interval_outer_steps": 200,
+    "frequency_lower_bound": 0.01,
+    "frequency_upper_bound": 1.2
+  },
+  "loss": {
+    "ode_weight": 1.0,
+    "flux_weight": 1.0,
+    "flux_weight_schedule": "constant",
+    "low_frequency_gbf": {
+      "enabled": true,
+      "weight": 0.001,
+      "requested_max_Momega": 0.04,
+      "points_requested": 64,
+      "points_in_grid": 64,
+      "omega_bounds": [
+        0.01,
+        0.07999999999999999
+      ],
+      "target": "C_l * (M * omega) ** (2*l + 2)",
+      "loss": "mean squared difference of log GBF"
+    }
+  },
+  "rar": {
+    "interval": 1000,
+    "candidate_count": 5000,
+    "points_added_per_refinement": 250,
+    "maximum_points": 2000,
+    "minimum_joint_distance": 0.01,
+    "restart_after": 5000
+  },
+  "query_steps": 200,
+  "diagnostic_omegas": [
+    0.01,
+    0.605,
+    1.2
+  ]
+}
