@@ -1,0 +1,48 @@
+# HTCondor submit file for:
+#   1. NumericalGBF.py
+#   2. PINNGBFWX.py
+#
+# The wrapper passes exactly the same mass, mode, x_extract,
+# and omega schedule parameters to both programs.
+#
+# NumericalGBF is run without --post_processing, so it produces
+# only numericalGBF.csv. PINNGBFWX then reads that CSV.
+
+executable = run_PINNGBFWX_validation.sh
+
+# -----------------------------
+# Run parameters
+# -----------------------------
+mass = 0.5
+mode = 2
+x_extract = 0.99
+omega_start = 1.2
+omega_final = 0.01
+query_steps = 200
+adam_steps = 36000
+lbfgs_steps = 5000
+curriculum_start = 0.5
+lowfreq_weight = 0.001
+lowfreq_max_M_omega = 0.04
+lowfreq_points = 64
+envelope_M_omega_b = 0.1
+res_norm = "env"
+
+arguments = "$(mass) $(mode) $(x_extract) $(omega_start) $(omega_final) $(query_steps) $(adam_steps) $(lbfgs_steps) $(curriculum_start) $(lowfreq_weight) $(lowfreq_max_M_omega) $(lowfreq_points) $(envelope_M_omega_b) $(res_norm)"
+
+# Preserve the submitter environment.
+getenv = True
+
+# Uncomment/adjust these for your cluster:
+request_gpus = 1
+request_cpus = 1
+request_memory = 8GB
+
+# Assumes the project directory is on a shared filesystem.
+should_transfer_files = NO
+
+output = logs/PINNGBFWX.$(ClusterId).$(ProcId).out
+error  = logs/PINNGBFWX.$(ClusterId).$(ProcId).err
+log    = logs/PINNGBFWX.$(ClusterId).log
+
+queue 1
