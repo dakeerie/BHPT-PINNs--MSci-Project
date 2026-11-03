@@ -1,17 +1,23 @@
 # HTCondor submit file for:
-#   1. NumericalGBF.py
-#   2. PINNGBFWX.py
+#   1. NumericalGBF.py   (optional, see run_numerical)
+#   2. PINNGBFWX.py      (needs gbf_reference.py in the same directory)
 #
-# The wrapper passes exactly the same mass, mode, x_extract,
-# and omega schedule parameters to both programs.
+# The wrapper forwards every option below to the PINN as a named flag, and passes the shared
+# mass, mode, x_extract, omega_start, omega_final and query_steps to NumericalGBF.py.
 #
-# NumericalGBF is run without --post_processing, so it produces
-# only numericalGBF.csv. PINNGBFWX then reads that CSV.
+# This file queues THREE jobs (A, B, C) that differ only in the training options, to decide Step 5:
+#   A_baseline   previous setup, corrected extraction, no low-frequency loss (pure physics)
+#   B_combined   all Step 3-4 training options, no low-frequency loss (pure physics)
+#   C_lowfreq    B plus the corrected, filtered, annealed low-frequency loss
+# All three use the same seed, so differences come from the settings alone.
 
 executable = run_PINNGBFWX_validation.sh
 
+# Run PINNGBFWX.py instead of the default gbf_pinn.py
+environment = "PINN_SCRIPT=PINNGBFWX.py"
+
 # -----------------------------
-# Run parameters
+# Shared run parameters
 # -----------------------------
 mass = 0.5
 mode = 2
@@ -22,18 +28,18 @@ query_steps = 200
 adam_steps = 36000
 lbfgs_steps = 5000
 curriculum_start = 0.5
-lowfreq_weight = 0.001
 lowfreq_max_M_omega = 0.04
 lowfreq_points = 64
 envelope_M_omega_b = 0.1
-res_norm = "env"
+res_norm = env
+pi_ustar_scale = 56.0
+run_numerical = no
 
-arguments = "$(mass) $(mode) $(x_extract) $(omega_start) $(omega_final) $(query_steps) $(adam_steps) $(lbfgs_steps) $(curriculum_start) $(lowfreq_weight) $(lowfreq_max_M_omega) $(lowfreq_points) $(envelope_M_omega_b) $(res_norm)"
+arguments = "--mass $(mass) --mode $(mode) --x_extract $(x_extract) --omega_start $(omega_start) --omega_final $(omega_final) --query_steps $(query_steps) --adam_steps $(adam_steps) --lbfgs_steps $(lbfgs_steps) --curriculum_start $(curriculum_start) --lowfreq_weight $(lowfreq_weight) --lowfreq_max_M_omega $(lowfreq_max_M_omega) --lowfreq_points $(lowfreq_points) --envelope_M_omega_b $(envelope_M_omega_b) --res_norm $(res_norm) --omega_sampling $(omega_sampling) --curriculum_begin $(curriculum_begin) --curriculum_end $(curriculum_end) --lowfreq_target $(lowfreq_target) --extra_input $(extra_input) --pi_ustar_scale $(pi_ustar_scale) --run_numerical $(run_numerical) --run_tag $(run_tag) $(extra_args)"
 
 # Preserve the submitter environment.
 getenv = True
 
-# Uncomment/adjust these for your cluster:
 request_gpus = 1
 request_cpus = 1
 request_memory = 8GB
@@ -41,8 +47,46 @@ request_memory = 8GB
 # Assumes the project directory is on a shared filesystem.
 should_transfer_files = NO
 
-output = logs/PINNGBFWX.$(ClusterId).$(ProcId).out
-error  = logs/PINNGBFWX.$(ClusterId).$(ProcId).err
+output = logs/PINNGBFWX.$(run_tag).$(ClusterId).$(ProcId).out
+error  = logs/PINNGBFWX.$(run_tag).$(ClusterId).$(ProcId).err
 log    = logs/PINNGBFWX.$(ClusterId).log
 
+# -----------------------------
+# Job A: previous training setup, low-frequency loss off
+# -----------------------------
+run_tag = A_baseline
+omega_sampling = linear_beta
+curriculum_begin = 0.10
+curriculum_end = 0.60
+extra_input = none
+lowfreq_weight = 0
+lowfreq_target = asymptotic
+extra_args =
+queue 1
+
+# -----------------------------
+# Job B: log-sampled omega, curriculum ends at 30% Adam, omega*r/(1+omega*r) input to network, low-frequency loss off
+# -----------------------------
+run_tag = B_combined
+omega_sampling = log_uniform
+curriculum_begin = 0.0
+curriculum_end = 0.3
+extra_input = omega_r
+lowfreq_weight = 0
+lowfreq_target = asymptotic
+extra_args =
+queue 1
+
+# -----------------------------
+# Job C: as B, plus the low-frequency loss with the Coulomb-corrected target, keeping only
+# points within 1% of the ODE reference, faded to zero by half-way through Adam
+# -----------------------------
+run_tag = C_lowfreq
+omega_sampling = log_uniform
+curriculum_begin = 0.0
+curriculum_end = 0.3
+extra_input = omega_r
+lowfreq_weight = 0.01
+lowfreq_target = coulomb
+extra_args = --lowfreq_target_tol 0.01 --lowfreq_anneal_end 0.5
 queue 1
