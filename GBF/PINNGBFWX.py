@@ -33,11 +33,11 @@
 # ============================================================================
 
 import torch as t
-import numpy as np 
+import numpy as np
 import matplotlib.pyplot as plt
 import torch.nn as nn
-import torch.optim as optim 
-import torch.nn.functional as F 
+import torch.optim as optim
+import torch.nn.functional as F
 import torch.distributions as dist
 import os
 import argparse
@@ -47,6 +47,13 @@ import json
 from datetime import datetime
 import math
 from scipy.special import lambertw
+import sys
+from functools import lru_cache
+
+#Exact far-zone basis, Wronskian extraction and ODE reference 
+sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+from gbf_reference import (far_zone_basis_at_x, extract_alpha_beta, scaled_flux_error, reference_gbf_ode,
+                           extraction_self_check)
 
 plt.rcParams.update({
     "font.family": "serif",
@@ -72,6 +79,14 @@ parser.add_argument('--lowfreq_max_M_omega', type =  float, default = 0.1, help 
 parser.add_argument('--lowfreq_points', type = int, default = 64, help = 'Number of fixed log-spaced frequencies for the low-frequency GBF loss')
 parser.add_argument('--envelope_M_omega_b', type = float, default = 0.1, help = 'Fixed dimensionless crossover M*omega_b for the static amplitude envelope (frequency gate); not currently trainable')
 parser.add_argument('--res_norm', choices = ['env', 'self', 'none'], default = 'none', help = 'Choose ODE and flux residual loss term normalisation. Options are: none, self, env')
+parser.add_argument('--reextract_checkpoint', type = str, default = None, help = 'Path to a saved .pth checkpoint: skip training, load the model and run the extraction report only')
+parser.add_argument('--omega_sampling', choices = ['linear_beta', 'log_uniform'], default = 'linear_beta', help = 'Training and RAR-candidate frequency distribution: linear_beta (60%% uniform + 40%% Beta(0.6, 2)) or log_uniform')
+parser.add_argument('--curriculum_begin', type = float, default = 0.10, help = 'Adam progress at which the lower frequency bound starts moving towards omega_final')
+parser.add_argument('--curriculum_end', type = float, default = 0.60, help = 'Adam progress at which the lower frequency bound reaches omega_final')
+parser.add_argument('--lowfreq_target', choices = ['asymptotic', 'coulomb'], default = 'asymptotic', help = 'Low-frequency GBF target: asymptotic = C_l (M omega)^(2l+2); coulomb = asymptotic x 4 pi M omega/(1 - exp(-4 pi M omega))')
+parser.add_argument('--lowfreq_target_tol', type = float, default = None, help = 'If set, keep only low-frequency loss points whose target agrees with the ODE reference to this relative tolerance (checked at start-up)')
+parser.add_argument('--lowfreq_anneal_end', type = float, default = None, help = 'If set, cosine-anneal the low-frequency weight from lowfreq_weight to 0 by this Adam progress (weight 0 during L-BFGS)')
+parser.add_argument('--extra_input', choices = ['none', 'omega_r', 'log_y'], default = 'none', help = 'Third network input: omega_r = 2*zeta - 1 with zeta = omega r/(1 + omega r); log_y = 2*ln(y)/ln(1 - x_extract) - 1; none = inputs (x, omega) only')
 
 args = parser.parse_args()
 mass = args.mass
@@ -117,11 +132,21 @@ if not (1e-6 < x_max <= 1.0 - 1e-3):
 if args.envelope_M_omega_b <= 0:
     raise ValueError("envelope_M_omega_b must be positive.")
 
+if not (0.0 <= args.curriculum_begin < args.curriculum_end <= 1.0):
+    raise ValueError("Require 0 <= curriculum_begin < curriculum_end <= 1.")
+
+if args.lowfreq_target_tol is not None and args.lowfreq_target_tol <= 0:
+    raise ValueError("lowfreq_target_tol must be positive.")
+
+if args.lowfreq_anneal_end is not None and not (0.0 < args.lowfreq_anneal_end <= 1.0):
+    raise ValueError("lowfreq_anneal_end must be in (0, 1].")
+
 #Frequency schedule from high to low for continuation
 omega_min = float(args.omega_final)
 omega_max = float(args.omega_start)
-diagnostic_omegas = [omega_min, 0.5*(omega_min + omega_max), float(omega_max)]
-monitor_omega = diagnostic_omegas[1]
+#Five log-spaced diagnostic frequencies (previously omega_min, the linear midpoint and omega_max); the monitor is the geometric mean
+diagnostic_omegas = [float(om) for om in np.geomspace(omega_min, omega_max, 5)]
+monitor_omega = diagnostic_omegas[2]
 x_diagnostic = np.linspace(1e-6, x_max, 5000)
 
 if not (omega_min/omega_max <= args.curriculum_start <= 1.0):
@@ -188,7 +213,7 @@ class keerie_adaptive_tanh(nn.Module):
 #PINN architecture
 class Model(nn.Module):
     def __init__(self, in_channels, out_channels, hidden_channels, num_hidden_layers=2):
-        super().__init__() 
+        super().__init__()
         self.input_layer = nn.Linear(in_channels, hidden_channels)
         self.act_input = keerie_adaptive_tanh(hidden_channels)
 
@@ -198,7 +223,7 @@ class Model(nn.Module):
             self.hidden_layers.append(nn.Linear(hidden_channels, hidden_channels))
             self.activations.append(keerie_adaptive_tanh(hidden_channels))
 
-        self.output_layer = nn.Linear(hidden_channels, out_channels) 
+        self.output_layer = nn.Linear(hidden_channels, out_channels)
 
     def forward(self, x: t.tensor):
         x = self.input_layer(x)
@@ -208,8 +233,8 @@ class Model(nn.Module):
             x = layer(x)
             x = act(x)
 
-        x = self.output_layer(x) 
-        return x 
+        x = self.output_layer(x)
+        return x
 
 #Define various functions
 #Derivative functions
@@ -235,7 +260,7 @@ def B(x, M, omega):
     real = (1 - x)*(1 - 3*x)
     imag = -4*M*omega
     return real, imag
-        
+
 def C(x, l):
     return -l*(l + 1) + 3*(1 - x)
 
@@ -263,7 +288,7 @@ def static_solution_coeffs(mode):
     #A recurrence relation can be derived for the coefficients a_k.
 
     L = mode*(mode + 1)
-    coeffs = {mode + 1: 1.0} 
+    coeffs = {mode + 1: 1.0}
     for j in range(mode + 1, 3, -1): #Maximum power is always l + 1 so minimum power is 3 as l>=2
         denominator = (j - 1)*(j - 2) - L
         if denominator == 0:
@@ -273,7 +298,7 @@ def static_solution_coeffs(mode):
     norm = sum(coeffs.values())
     if not np.isfinite(norm) or abs(norm) < 1e-14:
         raise ValueError(f"Cannot normalise static solution coefficients for l = {mode}.")
-    
+
     return {k: float(v/norm) for k, v in coeffs.items()}
 
 ENVELOPE_M_OMEGA_B = float(args.envelope_M_omega_b)
@@ -300,7 +325,7 @@ def amplitude_envelope(x, mass, mode, omega, return_components = False):
     epsilon = 2.0*mass*omega_tensor/c_l
 
     #Far factor F(x)
-    log_far = 0.5*(mode + 1)*(t.log1p(epsilon**2) - t.log1p((epsilon/y)**2))  
+    log_far = 0.5*(mode + 1)*(t.log1p(epsilon**2) - t.log1p((epsilon/y)**2))
     far_factor = t.exp(log_far)
 
     M_omega = mass*omega_tensor
@@ -333,11 +358,11 @@ def numpy_envelope_components(x_values, omega_value, mass, mode):
 
     if not np.all(np.isfinite(u_static)) or np.any(u_static <= 0):
             raise FloatingPointError(f"Static solution is non-finite or non-positive for mode={mode}")
-    
+
     for name, values in {"u_static": u_static, "far_factor": far_factor, "raw_envelope": raw_envelope, "envelope": envelope}.items():
         if not np.all(np.isfinite(values)):
             raise FloatingPointError(f"{name} is non-finite for mode={mode}, omega={omega_value}")
-        
+
         if np.any(values <= 0):
             raise FloatingPointError(f"{name} is non-positive for mode={mode}, omega={omega_value}")
 
@@ -485,7 +510,10 @@ def prepare_omega_tensor(omega, reference_tensor):
 
     return omega_tensor
 
-print(f"Training frequencies: 60% uniform + 40% Beta(0.6, 2.0) on [{omega_min:.6f}, {omega_max:.6f}]", flush = True)
+if args.omega_sampling == 'log_uniform':
+    print(f"Training frequencies: log-uniform on [{omega_min:.6f}, {omega_max:.6f}]", flush = True)
+else:
+    print(f"Training frequencies: 60% uniform + 40% Beta(0.6, 2.0) on [{omega_min:.6f}, {omega_max:.6f}]", flush = True)
 
 beta_dist = dist.Beta(t.tensor([0.6], dtype = DTYPE, device = device), t.tensor([0.1], dtype = DTYPE, device = device))
 omega_beta_dist = dist.Beta(t.tensor([0.6], dtype = DTYPE, device = device), t.tensor([2.0], dtype = DTYPE, device = device))
@@ -499,7 +527,15 @@ def sample_x_points(n_points, x_max, dtype, device):
 
     return t.cat([x_uniform, x_edges], dim = 0)
 
+def sample_log_uniform_omega(n_points, omega_lower, dtype, device):
+    #omega = exp(U(ln omega_lower, ln omega_max)): equal probability per decade, p(omega) = 1/(omega ln(omega_max/omega_lower))
+    log_lower, log_upper = math.log(omega_lower), math.log(omega_max)
+    return t.exp(log_lower + (log_upper - log_lower)*t.rand((n_points, 1), dtype = dtype, device = device))
+
 def sample_omega_points(n_points, omega_lower, dtype, device):
+    if args.omega_sampling == 'log_uniform':
+        return sample_log_uniform_omega(n_points, omega_lower, dtype, device)
+
     n_uniform = int(0.6 * n_points)
     n_beta = n_points - n_uniform
 
@@ -615,7 +651,10 @@ def select_rar_joint_points(model, n_candidates, n_add, x_max, mass, mode, devic
 
     x_candidates = sample_x_points(n_candidates, x_max, dtype = dtype, device = device)
 
-    omega_candidates = omega_lower + (omega_max - omega_lower)*t.rand((n_candidates, 1), dtype = dtype, device = device)
+    if args.omega_sampling == 'log_uniform':
+        omega_candidates = sample_log_uniform_omega(n_candidates, omega_lower, dtype, device)
+    else:
+        omega_candidates = omega_lower + (omega_max - omega_lower)*t.rand((n_candidates, 1), dtype = dtype, device = device)
 
     scores = ode_residual_score(model, x_candidates, mass, mode, omega_candidates)
 
@@ -666,8 +705,24 @@ def smoothstep(z):
     z = float(np.clip(z, 0.0, 1.0))
     return z*z*(3.0 - 2.0*z) #slight increasing curve between z = 0 and z = 1
 
+#Number of network inputs: (x, scaled omega) plus an optional third feature
+N_INPUTS = 2 if args.extra_input == 'none' else 3
+
+def extra_input_features(x_tensor, mass, omega_tensor):
+    #Optional third input, built from x_tensor so autograd differentiates through it in the ODE residual
+    if args.extra_input == 'none':
+        return []
+    y = (1.0 - x_tensor).clamp(min = 1e-12)
+    if args.extra_input == 'omega_r':
+        #omega r = 2 M omega / y; zeta = omega r/(1 + omega r) = 2 M omega/(y + 2 M omega) in (0, 1), mapped to (-1, 1)
+        two_M_omega = 2.0*mass*omega_tensor
+        zeta = two_M_omega/(y + two_M_omega)
+        return [2.0*zeta - 1.0]
+    #log_y: ln(y) runs from 0 (horizon) to ln(1 - x_extract) (outer edge), mapped to [-1, 1]
+    return [2.0*t.log(y)/math.log(1.0 - x_max) - 1.0]
+
 #Ansatz for the wave-function u
-#Ansatz is of the form u(x) = 1 + c1*x + c2*x**2 + c3*x**3 + c4*x*4 + x**5*E(x, omega)*(P + exp(2i*omega*r_star)*Q) 
+#Ansatz is of the form u(x) = 1 + c1*x + c2*x**2 + c3*x**3 + c4*x*4 + x**5*E(x, omega)*(P + exp(2i*omega*r_star)*Q)
 #where P and Q are complex with components corresponding to the four channel neural network output
 #Envelope E scales only the neural network correction and is fixed (not trainable at the moment)
 def ansatz(model, x_tensor, mass, mode, omega):
@@ -678,7 +733,7 @@ def ansatz(model, x_tensor, mass, mode, omega):
 
     omega_scaled = scale_omega(omega_tensor)
 
-    NN_input = t.cat([x_tensor, omega_scaled], dim = 1)
+    NN_input = t.cat([x_tensor, omega_scaled] + extra_input_features(x_tensor, mass, omega_tensor), dim = 1)
     NN = model(NN_input)
 
     P_re, P_im, Q_re, Q_im = NN[:, 0:1], NN[:, 1:2], NN[:, 2:3], NN[:, 3:4]
@@ -693,12 +748,12 @@ def ansatz(model, x_tensor, mass, mode, omega):
     u_im = c1_im*x_tensor + c2_im*x_tensor**2 + c3_im*x_tensor**3 + c4_im*x_tensor**4 + x_tensor**5*env*(P_im + Q_im*cs + Q_re*sn)
     return u_re, u_im, P_re, P_im, Q_re, Q_im
 
-#Coefficient of low-frequency limit of GBF (in Finnian Gray paper \Gamma \approx C_{l,s} (M\omega)^{2l+2}) with C_{l,2} given by function below 
+#Coefficient of low-frequency limit of GBF (in Finnian Gray paper \Gamma \approx C_{l,s} (M\omega)^{2l+2}) with C_{l,2} given by function below
 def low_frequency_GBF_coeff(mode):
 
     if mode < 2:
         raise ValueError("l >= 2 is requierd for spin-2 perturbations")
-    
+
     numerator = 2**(2*mode + 2)*math.factorial(mode - 2)*math.factorial(mode)*math.factorial(mode + 2)
     denominator = math.factorial(2*mode)*math.factorial(2*mode + 1)
     return (numerator/denominator)**2
@@ -708,7 +763,25 @@ def low_frequency_limit_GBF(mass, mode, omega):
     C = low_frequency_GBF_coeff(mode)
     return C*(dimensionless_omega)**(2*mode + 2)
 
-def differentiable_lowfreq_gbf(model, mass, mode,  omega_values, x_extract):
+#Exact infinity-ingoing basis u1 and du1/dx at an extraction point, cached because it depends only on (x, M*omega)
+#Uses the optimally truncated far-zone series, or inward Regge-Wheeler integration where the series is not accurate
+@lru_cache(maxsize = None)
+def extraction_basis(x_extract, Momega):
+    u1, du1_dx, _ = far_zone_basis_at_x(float(x_extract), float(Momega), mode)
+    return u1, du1_dx
+
+CDTYPE = t.complex128 if DTYPE == t.float64 else t.complex64
+
+def extraction_basis_tensors(omega_values, x_extract):
+    #Precomputed (constant, no-gradient) basis u1, du1/dx at x_extract for each omega in omega_values
+    pairs = [extraction_basis(float(x_extract), mass*float(om)) for om in omega_values.flatten().tolist()]
+    u1 = t.tensor([p[0] for p in pairs], dtype = CDTYPE, device = device)
+    du1 = t.tensor([p[1] for p in pairs], dtype = CDTYPE, device = device)
+    return u1, du1
+
+def differentiable_lowfreq_gbf(model, mass, mode,  omega_values, x_extract, u1, du1):
+    #u1, du1: precomputed basis at x_extract for each omega (from extraction_basis_tensors)
+    #alpha = u conj(u1) + G [u conj(u1') - u' conj(u1)],  G = x y^2/(2ik) = x y^2/(4 i M omega)
 
     omega_values =  omega_values.to(device = device, dtype = DTYPE).reshape(-1, 1)
     x_values = t.full_like(omega_values, float(x_extract), requires_grad = True)
@@ -720,19 +793,11 @@ def differentiable_lowfreq_gbf(model, mass, mode,  omega_values, x_extract):
     du = t.complex(du_re.squeeze(-1), du_im.squeeze(-1))
     om = omega_values.squeeze(-1)
 
-    L = mode*(mode + 1)
-    Omega = 4.0*mass*om
-
-    a1 = -1j*L/Omega
-    a2 = -(3.0 + (2.0 - L)*a1)/(1j*2.0*Omega)
-
-    y = 1.0 - float(x_extract)
     x = float(x_extract)
-    u1 = 1.0 + a1*y +  a2*y**2
-    du1  = -(a1 + 2.0*a2*y)
+    y = 1.0 - x
+    G = x*y*y/(4j*mass*om)
 
-    D = 1j*Omega/(y**2*x) + t.conj(du1/u1)
-    alpha = (u - du/D)/(u1 - du1/D)
+    alpha = u*t.conj(u1) + G*(u*t.conj(du1) - du*t.conj(u1))
     GBF = 1.0/(alpha.real.square() + alpha.imag.square())
     return GBF.reshape(-1, 1)
 
@@ -741,8 +806,27 @@ lowfreq_omega_max = min(omega_max, args.lowfreq_max_M_omega/mass)
 if args.lowfreq_weight > 0 and lowfreq_omega_max > omega_min:
     lowfreq_omega = t.logspace(math.log10(omega_min), math.log10(lowfreq_omega_max), steps = args.lowfreq_points, dtype = DTYPE, device = device).reshape(-1, 1)
     lowfreq_gbf_target = low_frequency_limit_GBF(mass, mode, lowfreq_omega)
-    print(f"Low-frequency GBF loss enabled: weight = {args.lowfreq_weight:g}, omega in [{omega_min:6g}, {lowfreq_omega_max}].", flush = True)
-    print(f"M*omega <= {mass*lowfreq_omega_max:6g}, points = {args.lowfreq_points}", flush = True)
+
+    if args.lowfreq_target == 'coulomb':
+        #Coulomb (Sommerfeld) factor z/(1 - exp(-z)), z = 4 pi M omega; = 1 + 2 pi M omega + O((M omega)^2)
+        z_coulomb = 4.0*math.pi*mass*lowfreq_omega
+        lowfreq_gbf_target = lowfreq_gbf_target*z_coulomb/(-t.expm1(-z_coulomb))
+
+    if args.lowfreq_target_tol is not None:
+        #Keep only points where the target agrees with the ODE reference to within the tolerance (the reference is used
+        #to choose WHICH points to keep, never as the target itself)
+        reference_values = t.tensor([reference_gbf_ode(mass*float(om), mode)["GBF"] for om in lowfreq_omega.flatten().tolist()], dtype = DTYPE, device = device).reshape(-1, 1)
+        target_rel_error = (lowfreq_gbf_target/reference_values - 1.0).abs()
+        keep = target_rel_error[:, 0] <= args.lowfreq_target_tol
+        print(f"Low-frequency target ({args.lowfreq_target}) vs ODE reference: kept {int(keep.sum())}/{keep.numel()} points with relative error <= {args.lowfreq_target_tol:g}", flush = True)
+        lowfreq_omega = lowfreq_omega[keep]
+        lowfreq_gbf_target = lowfreq_gbf_target[keep]
+        if lowfreq_omega.numel() == 0:
+            print("WARNING: no low-frequency loss points meet the target tolerance; the low-frequency loss is disabled.", flush = True)
+
+    if lowfreq_omega.numel() > 0:
+        print(f"Low-frequency GBF loss enabled: weight = {args.lowfreq_weight:g}, target = {args.lowfreq_target}, omega in [{lowfreq_omega.min().item():6g}, {lowfreq_omega.max().item():6g}].", flush = True)
+        print(f"M*omega <= {mass*lowfreq_omega.max().item():6g}, points = {lowfreq_omega.numel()}", flush = True)
 
 else:
     lowfreq_omega = t.empty((0, 1), dtype = DTYPE, device = device)
@@ -750,24 +834,26 @@ else:
     if args.lowfreq_weight > 0:
         print("WARNING: Low-frequency GBF loss disabled because the training interval does not overlap the requested M*omega limit.")
 
-def compute_lowfreq_gbf_loss(model, mass, mode):
+#Basis at x_max for every low-frequency loss frequency, computed once
+lowfreq_u1, lowfreq_du1 = extraction_basis_tensors(lowfreq_omega, x_max)
 
-    if args.lowfreq_weight <= 0 or lowfreq_omega.numel() == 0:
-        return t.zeros((), dtype = DTYPE, device = device)
+#Current low-frequency weight; updated every Adam epoch when --lowfreq_anneal_end is set
+lowfreq_weight_now = float(args.lowfreq_weight)
 
-    gbf_pred = differentiable_lowfreq_gbf(model, mass, mode, lowfreq_omega, x_max)
-
-    tiny = t.finfo(DTYPE).tiny
-    log_pred = t.log(gbf_pred.clamp_min(tiny))
-    log_target = t.log(lowfreq_gbf_target.clamp_min(tiny))
-
-    return t.mean((log_pred - log_target)**2)
+def lowfreq_weight_schedule(progress):
+    #Cosine anneal: w(p) = w0 * 0.5 * (1 + cos(pi * min(p/p_end, 1))), so w(0) = w0 and w(p >= p_end) = 0
+    if args.lowfreq_anneal_end is None:
+        return float(args.lowfreq_weight)
+    s = min(progress/args.lowfreq_anneal_end, 1.0)
+    return float(args.lowfreq_weight)*0.5*(1.0 + math.cos(math.pi*s))
 
 delta = 1e-12
 
 def res_normalisation(env, A_, B_re, B_im, C_, u_re, u_im, du_re, du_im, d2u_re, d2u_im, omega):
     if args.res_norm == 'env':
-        return env**2 + delta, env**2 + delta
+        #ODE residual ~ E, so its square is divided by E^2. Flux terms ~ omega |u|^2 ~ omega E^2, so J is divided by omega E^2
+        #(previously E^2, which left the flux loss scaled by omega^2 and down-weighted low frequencies)
+        return env**2 + delta, omega*env**2 + delta
     if args.res_norm == 'none':
         return 1.0, 1.0
     if args.res_norm == 'self':
@@ -778,7 +864,7 @@ def compute_loss(model, x_tensor, mass, mode, omega, flux_weight):
 
     #ODE residual
     u_re, u_im, P_re, P_im, Q_re, Q_im = ansatz(model, x_tensor, mass, mode, omega)
-    
+
     du_re, d2u_re = grads(u_re, x_tensor)
     du_im, d2u_im = grads(u_im, x_tensor)
 
@@ -805,29 +891,59 @@ def compute_loss(model, x_tensor, mass, mode, omega, flux_weight):
 
     active = lowfreq_omega[:, 0] >= omega_low
 
-    if not active.any():
+    #Skip the extra forward pass when the low-frequency term has zero weight
+    if lowfreq_weight_now == 0.0 or not active.any():
         loss_lowfreq = t.zeros((), dtype = DTYPE, device = device)
     else:
         omega_active = lowfreq_omega[active]
         target_active = lowfreq_gbf_target[active]
 
-        gbf_pred = differentiable_lowfreq_gbf(model, mass, mode, omega_active, x_max)
+        gbf_pred = differentiable_lowfreq_gbf(model, mass, mode, omega_active, x_max, lowfreq_u1[active], lowfreq_du1[active])
         loss_lowfreq = t.mean((t.log(gbf_pred.clamp_min(t.finfo(DTYPE).tiny)) - t.log(target_active.clamp_min(t.finfo(DTYPE).tiny)))**2)
 
     #Loss annealing to be included
-    total_loss = loss_ode + flux_weight*loss_flux + args.lowfreq_weight*loss_lowfreq
+    total_loss = loss_ode + flux_weight*loss_flux + lowfreq_weight_now*loss_lowfreq
 
     return u_re, u_im, J, total_loss, loss_flux, loss_lowfreq, loss_ode, loss_ode_re, loss_ode_im, res_ode_re, res_ode_im, P_re, P_im, Q_re, Q_im
 
-#Calculates GBF via alpha = (u - u'/D)/(u1 - u1'/D) with D the log derivative of the u2 branch
-#u1 is obtained via an asymptotic expansion and u is the wavefunction the network approximates
-#See paper for full derivation (needs to be made more rigorous)
+#Calculates alpha, beta and the GBF from the network's u and u' at x_extraction using the exact far-zone basis
+#and the Wronskian formulas (derivation in gbf_reference.extract_alpha_beta):
+#   alpha = u conj(u1) + G [u conj(u1') - u' conj(u1)],   beta = exp(-2 i omega r*) G [u1 u' - u1' u],   G = g(x)/(2 i omega)
 def extraction(model, x_extraction, mass, mode, omega):
+
+    x_extraction_tensor = t.tensor(x_extraction, requires_grad = True, dtype = DTYPE, device = device).view(-1, 1)
+
+    u_max_re, u_max_im, *_ = ansatz(model, x_extraction_tensor, mass, mode, omega)
+
+    #Eval grad used to prevent creation of a graph within the extraction function
+    du_max_re = eval_grad(u_max_re, x_extraction_tensor)
+    du_max_im = eval_grad(u_max_im, x_extraction_tensor)
+
+    u_max = complex(u_max_re.item(), u_max_im.item())
+    du_max = complex(du_max_re.item(), du_max_im.item())
+
+    u1, du1 = extraction_basis(float(x_extraction), float(mass*omega))
+    alpha, beta = extract_alpha_beta(u_max, du_max, u1, du1, float(x_extraction), float(mass*omega))
+
+    if not np.isfinite(alpha) or abs(alpha) == 0:
+        raise FloatingPointError(f"Invalid alpha at omega={omega}: {alpha}")
+
+    if not np.isfinite(beta):
+        raise FloatingPointError(f"Invalid beta at omega={omega}: {beta}")
+
+    #|alpha|^2 - |beta|^2 (= 1 exactly); use scaled_flux_error(alpha, beta) for a scale-free check
+    prob = np.abs(alpha)**2 - np.abs(beta)**2
+    gbf = 1/np.abs(alpha)**2
+
+    return alpha, beta, prob, gbf
+
+#ORIGINAL extraction (two-term far-zone series, alpha = (u - u'/D)/(u1 - u1'/D)); kept only for comparison in extraction_report
+def extraction_two_term(model, x_extraction, mass, mode, omega):
 
     L = mode*(mode + 1)
     Omega = 4*mass*omega
-    
-    x_extraction_tensor = t.tensor(x_extraction, requires_grad = True, dtype = DTYPE, device = device).view(-1, 1) 
+
+    x_extraction_tensor = t.tensor(x_extraction, requires_grad = True, dtype = DTYPE, device = device).view(-1, 1)
 
     u_max_re, u_max_im, *_ = ansatz(model, x_extraction_tensor, mass, mode, omega)
 
@@ -870,6 +986,77 @@ def extraction(model, x_extraction, mass, mode, omega):
 
     return alpha, beta, prob, gbf
 
+def extraction_report(model, out_dir, consistency_every = 5):
+    #Trained-PINN GBF from the new and original extraction vs the ODE reference on the query grid, plus a check that the
+    #new extraction gives the same GBF at extraction points inside x_max (x = 1 - (1 - x_max)*f, f = 1.5, 2, 4)
+    os.makedirs(out_dir, exist_ok = True)
+    omega_grid = np.logspace(np.log10(omega_min), np.log10(omega_max), args.query_steps)
+    x_check = [xe for xe in (1.0 - (1.0 - x_max)*f for f in (1.5, 2.0, 4.0)) if xe > 0.5]
+
+    rows = []
+    for i, omega in enumerate(omega_grid):
+        Mw = mass*float(omega)
+        gbf_ref = reference_gbf_ode(Mw, mode)["GBF"]
+        alpha_new, beta_new, _, gbf_new = extraction(model, x_max, mass, mode, float(omega))
+
+        try:
+            gbf_old = extraction_two_term(model, x_max, mass, mode, float(omega))[3]
+        except FloatingPointError:
+            gbf_old = np.nan
+
+        spread = np.nan
+        if x_check and (i % consistency_every == 0 or i == len(omega_grid) - 1):
+            gbf_alt = [extraction(model, xe, mass, mode, float(omega))[3] for xe in x_check]
+            spread = max(abs(gv/gbf_new - 1.0) for gv in gbf_alt)
+
+        rows.append({"omega": float(omega), "Momega": Mw, "GBF_reference": gbf_ref, "GBF_new": gbf_new, "GBF_original": gbf_old,
+                     "rel_error_new": abs(gbf_new - gbf_ref)/gbf_ref, "rel_error_original": abs(gbf_old - gbf_ref)/gbf_ref,
+                     "scaled_flux_error_new": scaled_flux_error(alpha_new, beta_new), "x_extract_spread": spread})
+
+    report_csv = os.path.join(out_dir, "extraction_report.csv")
+    with open(report_csv, 'w', newline = '') as f:
+        writer = csv.writer(f)
+        writer.writerow(list(rows[0].keys()))
+        for r in rows:
+            writer.writerow([f"{v:.12e}" for v in r.values()])
+
+    Mw = np.array([r["Momega"] for r in rows])
+    err_new = np.array([r["rel_error_new"] for r in rows])
+    err_old = np.array([r["rel_error_original"] for r in rows])
+    spread = np.array([r["x_extract_spread"] for r in rows])
+    flux = np.abs(np.array([r["scaled_flux_error_new"] for r in rows]))
+
+    fig, axes = plt.subplots(2, 2, figsize = (13, 9))
+    axes[0, 0].loglog(Mw, [r["GBF_reference"] for r in rows], label = "ODE reference")
+    axes[0, 0].loglog(Mw, [r["GBF_new"] for r in rows], "--", label = "PINN, new extraction")
+    axes[0, 0].loglog(Mw, [r["GBF_original"] for r in rows], ":", label = "PINN, original extraction")
+    axes[0, 0].set(ylabel = r"$\Gamma$", title = "GBF")
+    axes[0, 1].loglog(Mw, np.maximum(err_new, 1e-17), label = "new extraction")
+    axes[0, 1].loglog(Mw, np.maximum(err_old, 1e-17), label = "original extraction")
+    axes[0, 1].set(ylabel = "relative error vs reference", title = "PINN GBF error")
+    ok = np.isfinite(spread)
+    axes[1, 0].loglog(Mw[ok], np.maximum(spread[ok], 1e-17), "o-")
+    axes[1, 0].set(ylabel = r"max$_x$ |$\Gamma(x)/\Gamma(x_{\max})$ - 1|", title = "Extraction-point consistency (new)")
+    axes[1, 1].loglog(Mw, np.maximum(flux, 1e-17))
+    axes[1, 1].set(ylabel = r"$|\,|\alpha|^2-|\beta|^2-1\,|/(|\alpha|^2+|\beta|^2)$", title = "Scaled flux error (new)")
+    for ax in axes.flat:
+        ax.set_xlabel(r"$M\omega$")
+        ax.grid(True, which = "both", alpha = 0.3)
+    for ax in (axes[0, 0], axes[0, 1]):
+        ax.legend()
+    fig.suptitle(rf"Extraction report, $\ell = {mode}$, $x_{{\max}} = {x_max:g}$")
+    fig.tight_layout()
+    fig.savefig(os.path.join(out_dir, "extraction_report.png"), dpi = 200)
+    plt.close(fig)
+
+    for label, mask in (("M*omega < 0.05", Mw < 0.05), ("M*omega >= 0.05", Mw >= 0.05)):
+        if mask.any():
+            print(f"{label}: median|max rel. error  new = {np.nanmedian(err_new[mask]):.2e} | {np.nanmax(err_new[mask]):.2e}, "
+                  f"original = {np.nanmedian(err_old[mask]):.2e} | {np.nanmax(err_old[mask]):.2e}", flush = True)
+    print(f"Max x_extract spread (new) = {np.nanmax(spread):.2e} | max |scaled flux error| (new) = {np.nanmax(flux):.2e}", flush = True)
+    print(f"Saved extraction report to {report_csv}", flush = True)
+    return rows
+
 def u_from_ustar(ustar):
     """Calculates dimensionless u = r/2M from dimensionless tortoise coordinate u_* = r_*/2M"""
     ustar_arr = np.asarray(ustar, dtype = float)
@@ -895,7 +1082,7 @@ def u_from_ustar(ustar):
     return (1.0 + w).reshape(original_shape)
 
 def RW_potential(u, mode):
-    #Dimensionless potential- see appendix B of Gray and Visser paper 
+    #Dimensionless potential- see appendix B of Gray and Visser paper
     return (1.0 - 1.0/u)*(mode*(mode + 1)/u**2 -3/u**3)
 
 def negative_integrand_values(ustar_nodes, Momega, mode):
@@ -918,7 +1105,7 @@ def negative_integrand_values(ustar_nodes, Momega, mode):
 
 def product_integral_GBF(x, mode, ustar_min = -50.0, ustar_max = 350.0, N = 10000):
     # Calculates the GBF for dimensionless frequency x = M*omega using a fifth order path-ordered exponential/product integral approach.
-    # Parameters: 
+    # Parameters:
     #     x: float, dimensionless frequency x = M*omega
     #     mode: int, multipole mode l (>=2 here)
     #     ustar_min, ustar_max: float, finite approximation of tortoise coordinate limits- paper uses [-50, 350]
@@ -928,7 +1115,7 @@ def product_integral_GBF(x, mode, ustar_min = -50.0, ustar_max = 350.0, N = 1000
     #     T: float, transmission probability i.e. GBF
     #     alpha: complex, Bogoliubov coefficient alpha(x)
     #     beta: complex, Bogoliubov coefficient beta(x)
-    
+
     # The Helton-Stuckwisch approximation computes the inverse transfer matrix H = [[alpha*, -beta*], [-beta, alpha]] so alpha = conj(H[0, 0]) and beta = -H[1, 0]
 
     x = float(x)
@@ -1003,7 +1190,7 @@ def query_gbf(model, mass, mode, omega_query, x_extract):
         for omega in np.asarray(omega_query).flatten():
             alpha, beta, prob, gbf = extraction(model, x_extract, mass, mode, float(omega))
             results.append({'omega': float(omega), 'alpha': alpha, 'beta': beta, 'probability': prob, 'gbf': gbf})
-    
+
     return results
 
 def query_wavefunction(model, mass, mode, omega_query, x_values):
@@ -1156,10 +1343,10 @@ def load_numerical_gbf(csv_path, mass, mode, x_extract):
             row_mass = float(row["mass"])
             row_mode = int(row["mode"])
             row_x_extract = float(row["x_extract"])
-    
+
             if not np.isclose(row_mass, mass, rtol = 0.0, atol = 1e-12):
                 continue
-    
+
             if row_mode != mode:
                 continue
 
@@ -1168,7 +1355,7 @@ def load_numerical_gbf(csv_path, mass, mode, x_extract):
 
             if row["success"].strip().lower() not in {"true", "1"}:
                 continue
-            
+
             omega = float(row['omega'])
             gbf = float(row['GBF'])
 
@@ -1256,7 +1443,7 @@ def save_simulation_comparison_plots(omegas, pinn_gbfs, numerical_gbfs, absolute
     plt.yscale('log')
     plt.title(f'Log-scale GBF Comparison - {title_suffix}')
     plt.grid()
-    plt.legend()    
+    plt.legend()
 
     plt.tight_layout()
     plt.savefig(os.path.join(comparisons_dir, f'SimvsPINN_GBF.png'), format='png')
@@ -1288,7 +1475,7 @@ def save_simulation_comparison_plots(omegas, pinn_gbfs, numerical_gbfs, absolute
 def plot_joint_residual_heatmap(model, epoch, mass, mode, x_max, rar_x = None, rar_omega = None, nx = 120, n_omega = 120, chunk_size = 2000):
 
     x_axis = np.linspace(1e-6, x_max, nx)
-    omega_axis = np.linspace(omega_min, omega_max, n_omega)
+    omega_axis = np.geomspace(omega_min, omega_max, n_omega)
 
     X, W = np.meshgrid(x_axis, omega_axis, indexing = 'xy')
 
@@ -1328,6 +1515,7 @@ def plot_joint_residual_heatmap(model, epoch, mass, mode, x_max, rar_x = None, r
         ax.set_xlabel(r"$x$", fontsize = 16)
         ax.set_xlim(x_axis[0], x_axis[-1])
         ax.set_ylim(omega_min, omega_max)
+        ax.set_yscale('log')
 
     axes[0].set_ylabel(r"$\omega$")
 
@@ -1346,7 +1534,7 @@ def plot_joint_residual_heatmap(model, epoch, mass, mode, x_max, rar_x = None, r
     rar_x_save = rar_x.detach().cpu().numpy().flatten() if rar_x is not None else np.empty(0)
     rar_omega_save = rar_omega.detach().cpu().numpy().flatten() if rar_omega is not None else np.empty(0)
 
-    np.savez_compressed(npz_path, x = x_axis, omega = omega_axis, residual_magnitude = ode_magnitude, log10_residual = log_ode, flux_residual = flux_grid, log10_flux_residual = log_flux, 
+    np.savez_compressed(npz_path, x = x_axis, omega = omega_axis, residual_magnitude = ode_magnitude, log10_residual = log_ode, flux_residual = flux_grid, log10_flux_residual = log_flux,
                         rar_x = rar_x_save, rar_omega = rar_omega_save)
 
     print(f"Saved RAR residual heatmap: {png_path}", flush = True)
@@ -1359,13 +1547,17 @@ t.manual_seed(0)
 if t.cuda.is_available():
     t.cuda.manual_seed_all(0)
 
-model = Model(2, 4, 64, num_hidden_layers = 3).to(device = device, dtype = DTYPE)
-    
+model = Model(N_INPUTS, 4, 64, num_hidden_layers = 3).to(device = device, dtype = DTYPE)
+
 #Make various directories for saving results
 run_id = datetime.now().strftime("%Y%m%d_%H%M%S")
 run_name = f"{run_id}_M{mass:g}_x{x_max:g}_w{omega_min:g}-{omega_max:g}_adam{args.adam_steps}_lbfgs{args.lbfgs_steps}"
 
-base_path = os.path.join("./GBFWXData", f"l{mode}", run_name)
+if args.reextract_checkpoint is not None:
+    #Re-extraction outputs go next to the checkpoint being analysed
+    base_path = os.path.join(os.path.dirname(os.path.abspath(args.reextract_checkpoint)), f"reextract_{run_id}")
+else:
+    base_path = os.path.join("./GBFWXData", f"l{mode}", run_name)
 diagnostic_dir = os.path.join(base_path, 'diagnostics')
 results_dir = os.path.join(base_path, 'results')
 comparisons_dir = os.path.join(base_path, 'comparisons')
@@ -1383,13 +1575,43 @@ plot_amplitude_envelope_diagnostics(mass, mode, x_max, omega_min, omega_max)
 run_envelope_self_checks(mass, mode, x_max)
 print(f"Saved static amplitude-envelope diagnostics to {diagnostic_dir}", flush=True)
 
+#Extraction self-check: apply the new and original extraction to the EXACT solution at x_max (what a perfect PINN would give)
+extraction_check_rows = [extraction_self_check(x_max, Mw, mode) for Mw in (mass*omega_min, mass*np.sqrt(omega_min*omega_max), mass*omega_max)]
+with open(os.path.join(diagnostic_dir, "extraction_self_check.csv"), 'w', newline = '') as f:
+    writer = csv.writer(f)
+    writer.writerow(list(extraction_check_rows[0].keys()))
+    for r in extraction_check_rows:
+        writer.writerow(list(r.values()))
+for r in extraction_check_rows:
+    print(f"Extraction self-check M*omega = {r['Momega']:.4g}: exact-solution GBF error new = {r['rel_error_new']:.1e}, "
+          f"original = {r['rel_error_two_term']:.1e} (basis: {r['basis_method']})", flush = True)
+    if r["rel_error_new"] > 1e-8:
+        raise RuntimeError(f"New extraction fails on the exact solution at M*omega = {r['Momega']}: rel. error {r['rel_error_new']:.2e}")
+
+#Re-extraction mode: load a trained model, run the extraction report and stop (no training)
+if args.reextract_checkpoint is not None:
+    checkpoint_in = t.load(args.reextract_checkpoint, map_location = device, weights_only = False) #own checkpoint file
+    saved_args = checkpoint_in.get("config", {}).get("arguments", {})
+    if not saved_args:
+        print("WARNING: checkpoint has no saved arguments; cannot verify that the command-line settings match it.", flush = True)
+    for key in ("mass", "mode", "x_extract", "omega_start", "omega_final", "envelope_M_omega_b"):
+        if key in saved_args and not np.isclose(float(saved_args[key]), float(getattr(args, key)), rtol = 0.0, atol = 1e-12):
+            raise ValueError(f"--{key} = {getattr(args, key)} does not match the checkpoint value {saved_args[key]}")
+    #Checkpoints from before Step 4 have no 'extra_input' and are 2-input models
+    if saved_args.get("extra_input", "none") != args.extra_input:
+        raise ValueError(f"--extra_input = {args.extra_input} does not match the checkpoint value {saved_args.get('extra_input', 'none')}")
+    model.load_state_dict(checkpoint_in["model_state_dict"])
+    print(f"Loaded model from {args.reextract_checkpoint}; running extraction report only.", flush = True)
+    extraction_report(model, comparisons_dir)
+    sys.exit(0)
+
 loss_history_dir = os.path.join(diagnostic_dir, "loss_history.csv")
 
 with open(loss_history_dir, 'w', newline = '') as f:
     writer = csv.writer(f)
     writer.writerow(['epoch', 'stage', 'total_loss', 'flux_loss', 'low-freq_loss', 'ode_loss', 'ode_real_loss', 'ode_imag_loss', 'flux_weight', 'grad_norm_preclip', 'gradient_clipped', 'learning_rate_used'])
 
-adam_iterations = args.adam_steps 
+adam_iterations = args.adam_steps
 lbfgs_iterations = args.lbfgs_steps
 
 hist_epochs, hist_total, hist_flux, hist_lowfreq, hist_ode, hist_ode_re, hist_ode_im, hist_weight = [], [], [], [], [], [], [], []
@@ -1459,7 +1681,8 @@ run_config = {
     },
 
     "model": {
-        "in_channels": 2,
+        "in_channels": N_INPUTS,
+        "extra_input": args.extra_input,
         "out_channels": 4,
         "hidden_channels": 64,
         "hidden_layers": 3,
@@ -1486,17 +1709,19 @@ run_config = {
         "x_uniform_fraction": 0.6,
         "x_beta_alpha": 0.6,
         "x_beta_beta": 0.1,
-        "omega_uniform_fraction": 0.6,
-        "omega_beta_alpha": 0.6,
-        "omega_beta_beta": 2.0,
+        "omega_sampling": args.omega_sampling,
+        "omega_uniform_fraction": 0.6 if args.omega_sampling == 'linear_beta' else None,
+        "omega_beta_alpha": 0.6 if args.omega_sampling == 'linear_beta' else None,
+        "omega_beta_beta": 2.0 if args.omega_sampling == 'linear_beta' else None,
+        "rar_omega_candidates": "linear uniform" if args.omega_sampling == 'linear_beta' else "log-uniform",
         "omega_scaling": "fixed global logarithmic scaling",
     },
 
     "curriculum": {
         "type": "global smoothstep transition in log-frequency",
         "initial_lower_bound": float(args.curriculum_start * omega_max),
-        "transition_start_progress": 0.10,
-        "transition_end_progress": 0.60,
+        "transition_start_progress": float(args.curriculum_begin),
+        "transition_end_progress": float(args.curriculum_end),
         "final_lower_bound": omega_min,
         "progress_definition": "epoch / (adam_steps - 1)",
     },
@@ -1537,9 +1762,19 @@ run_config = {
             "points_requested": int(args.lowfreq_points),
             "points_in_grid": int(lowfreq_omega.numel()),
             "omega_bounds": lowfreq_omega_bounds,
-            "target": "C_l * (M * omega) ** (2*l + 2)",
+            "target": ("C_l * (M * omega) ** (2*l + 2)" if args.lowfreq_target == 'asymptotic'
+                       else "C_l * (M * omega) ** (2*l + 2) * z/(1 - exp(-z)), z = 4 pi M omega"),
+            "target_tolerance_vs_reference": args.lowfreq_target_tol,
+            "anneal_end_progress": args.lowfreq_anneal_end,
+            "weight_during_lbfgs": 0.0 if args.lowfreq_anneal_end is not None else float(args.lowfreq_weight),
             "loss": "mean squared difference of log GBF",
         },
+    },
+
+    "extraction": {
+        "basis": "optimally truncated far-zone series; inward Regge-Wheeler integration where the series is inaccurate",
+        "formula": "Wronskian with exact constant 2ik: alpha = u conj(u1) + G[u conj(u1') - u' conj(u1)], G = g/(2 i omega)",
+        "module": "gbf_reference.py",
     },
 
     "rar": {
@@ -1566,7 +1801,8 @@ for epoch in range(adam_iterations):
 
     progress = epoch/max(adam_iterations - 1, 1)
     omega_initial = args.curriculum_start*omega_max
-    expansion = smoothstep((progress - 0.1)/0.5)
+    expansion = smoothstep((progress - args.curriculum_begin)/(args.curriculum_end - args.curriculum_begin))
+    lowfreq_weight_now = lowfreq_weight_schedule(progress)
 
     omega_low = np.exp((1.0 - expansion)*np.log(omega_initial) + expansion*np.log(omega_min))
 
@@ -1581,7 +1817,7 @@ for epoch in range(adam_iterations):
 
     flux_weight = annealing(epoch, adam_iterations)
     hist_weight.append(flux_weight)
-    (Re_u_nn, Im_u_nn, flux_res, loss, loss_f, loss_lowfreq, loss_o, 
+    (Re_u_nn, Im_u_nn, flux_res, loss, loss_f, loss_lowfreq, loss_o,
     loss_ode_real, loss_ode_imag, res_ode_re, res_ode_im, P_re, P_im, Q_re, Q_im) = compute_loss(model, x_tensor, mass, mode, omega_tensor, flux_weight)
 
     loss.backward()
@@ -1589,7 +1825,7 @@ for epoch in range(adam_iterations):
     grad_norm = t.nn.utils.clip_grad_norm_(model.parameters(), max_norm = MAX_GRAD_NORM, error_if_nonfinite = True)
     grad_norm_value = grad_norm.item()
     gradient_clipped = grad_norm_value > MAX_GRAD_NORM
-    
+
     hist_grad_norm.append(grad_norm_value)
     hist_clipped.append(gradient_clipped)
 
@@ -1621,14 +1857,14 @@ for epoch in range(adam_iterations):
             GBF.append(gbf)
 
             if (epoch + 1) % 500 == 0 or epoch == 0:
-                print(f"""l = {mode} | Adam Epoch: {epoch + 1} / {adam_iterations}. 
+                print(f"""l = {mode} | Adam Epoch: {epoch + 1} / {adam_iterations}.
                         Batch omegas min|max|mean: {omega_tensor.min().item():.4f} | {omega_tensor.max().item():.4f} | {omega_tensor.mean().item():.4f},
                         Diagnostic omegas = {[f"{om:.4f}" for om in diagnostic_omegas]},
-                        Total scaled loss: {loss.item():.4e}, 
+                        Total scaled loss: {loss.item():.4e},
                         Flux loss: {loss_f.item():.4e},
                         ODE loss: {loss_o.item():.4e},
                         Monitor GBF: {gbf},
-                        Monitor |alpha|^2 - |beta|^2: {prob}.""", flush = True)
+                        Monitor scaled flux error: {scaled_flux_error(alpha, beta):.3e}.""", flush = True)
                 print("-"*60, flush = True)
 
     if (epoch + 1) % 1000 == 0:
@@ -1647,9 +1883,9 @@ for epoch in range(adam_iterations):
     rar_restart_now = rar_full_epoch is not None and current_epoch < adam_iterations and current_epoch - rar_full_epoch >= RAR_RESTART_AFTER
 
     if rar_restart_now:
-        
+
         print(f"RAR set filled at epoch {rar_full_epoch}. Restarting at epoch {current_epoch}.")
-        
+
         rar_x = t.empty((0, 1), dtype = DTYPE, device = device)
         rar_omega = t.empty((0, 1), dtype = DTYPE, device = device)
         rar_full_epoch = None
@@ -1746,6 +1982,9 @@ if len(clipped_array) >= window:
 lbfgs_steps_completed = 0
 flux_weight = annealing(adam_iterations - 1, adam_iterations)
 
+#With annealing the low-frequency term is switched off for L-BFGS; without it the weight stays constant (previous behaviour)
+lowfreq_weight_now = 0.0 if args.lowfreq_anneal_end is not None else float(args.lowfreq_weight)
+
 lbfgs_success = True
 x_tensor_lbfgs, omega_tensor_lbfgs = sample_joint_batch(n_points = N_points, x_max = x_max, dtype = DTYPE, device = device, rar_x = rar_x, rar_omega = rar_omega, omega_lower = omega_min)
 lbfgs_optimiser = optim.LBFGS(model.parameters(), lr = 1.0, max_iter = 20, history_size = 50, line_search_fn = "strong_wolfe")
@@ -1759,7 +1998,7 @@ for epoch in range(lbfgs_iterations):
         lbfgs_optimiser = optim.LBFGS(model.parameters(), lr = 1.0, max_iter = 20, history_size = 50, line_search_fn = "strong_wolfe")
 
         print(f"Refreshed L-BFGS batch  and restarted optimiser history at outer step {epoch}.", flush = True)
-    
+
     def closure():
         lbfgs_optimiser.zero_grad(set_to_none = True)
         (Re_u_nn, Im_u_nn, flux_res,  loss, loss_f, loss_lowfreq, loss_o, loss_ode_re, loss_ode_im,
@@ -1777,7 +2016,7 @@ for epoch in range(lbfgs_iterations):
     info.update({'total': loss_now.item(), 'flux': lf_now.item(), 'low_freq': llfreq_now.item(), 'ode': lo_now.item(), 'loss_re': lre.item(), 'loss_im': lim.item()})
 
     global_epoch = adam_iterations + epoch
-    
+
     hist_epochs.append(global_epoch + 1)
     hist_total.append(loss_now.item())
     hist_flux.append(lf_now.item())
@@ -1806,20 +2045,20 @@ for epoch in range(lbfgs_iterations):
         betas.append(beta)
         probability.append(prob)
         GBF.append(gbf)
-        
-        print(f"""l = {mode} | L-BFGS Epoch: {epoch + 1} / {lbfgs_iterations}. 
+
+        print(f"""l = {mode} | L-BFGS Epoch: {epoch + 1} / {lbfgs_iterations}.
                     Fixed-batch omega min|max = {omega_tensor_lbfgs.min().item():.4f} | {omega_tensor_lbfgs.max().item():.4f},
                     Diagnostic omegas = {[f"{om:.4f}" for om in diagnostic_omegas]},
-                    Total scaled loss: {info['total']:.4e}, 
+                    Total scaled loss: {info['total']:.4e},
                     Flux loss: {info['flux']:.4e},
                     ODE loss: {info['ode']:.4e},
                     Monitor GBF: {gbf},
-                    Monitor |alpha|^2 - |beta|^2: {prob}.""", flush = True)
+                    Monitor scaled flux error: {scaled_flux_error(alpha, beta):.3e}.""", flush = True)
         print("-"*60, flush = True)
 
         diagnostic_model_states.append({'iteration': global_epoch + 1, 'stage': 'L-BFGS', 'state_dict': {key: value.detach().cpu().clone() for key, value in model.state_dict().items()}})
 
-        plot_joint_residual_heatmap(model = model, epoch = global_epoch + 1, mass = mass, mode = mode, x_max = x_max, rar_x = rar_x, rar_omega = rar_omega, 
+        plot_joint_residual_heatmap(model = model, epoch = global_epoch + 1, mass = mass, mode = mode, x_max = x_max, rar_x = rar_x, rar_omega = rar_omega,
                                     nx = RAR_HEATMAP_NX, n_omega = RAR_HEATMAP_NOMEGA, chunk_size = 2000)
 
         for omega_diag in diagnostic_omegas:
@@ -1829,9 +2068,9 @@ for epoch in range(lbfgs_iterations):
 checkpoint_path = os.path.join(base_path, "trained_model.pth")
 
 final_model_checkpoint = {
-    "checkpoint_version": 1, 
-    "model_state_dict": get_cpu_model_state(model), 
-    "model_architecture": run_config["model"], 
+    "checkpoint_version": 1,
+    "model_state_dict": get_cpu_model_state(model),
+    "model_architecture": run_config["model"],
     "config": run_config,
     "training_status": {"adam_steps_requested": adam_iterations,
         "adam_steps_completed": len([e for e in hist_epochs if e <= adam_iterations]),
@@ -1868,20 +2107,23 @@ dense_query_gbfs = np.array([result['gbf'] for result in dense_query_results])
 query_gbf_path = os.path.join(results_dir, "PINN_query_frequencies.csv")
 query_wronskian = np.array([result["probability"] for result in dense_query_results])
 
-wronskian_error = np.abs(query_wronskian - 1.0)
+#Scale-free flux-identity error (|alpha|^2 - |beta|^2 - 1)/(|alpha|^2 + |beta|^2); the unscaled version is amplified by 1/GBF at low omega
+query_scaled_flux = np.array([scaled_flux_error(result['alpha'], result['beta']) for result in dense_query_results])
 
-print(f"Maximum Wronskian-identity error: {np.max(wronskian_error):.6e}", flush = True)
+print(f"Maximum scaled flux-identity error: {np.max(np.abs(query_scaled_flux)):.6e}", flush = True)
 
 plt.figure(figsize = (7, 5))
-plt.plot(dense_query_omegas, query_wronskian, label = r"$|\alpha|^2 - |\beta|^2$")
-plt.axhline(1.0,  linestyle = '--', label = "Target")
-plt.xlabel(r"$\omega$", fontsize = 16)
-plt.ylabel("Wronskian")
-plt.grid()
+plt.loglog(mass*dense_query_omegas, np.maximum(np.abs(query_scaled_flux), 1e-17), label = r"$|\,|\alpha|^2 - |\beta|^2 - 1\,|/(|\alpha|^2 + |\beta|^2)$")
+plt.xlabel(r"$M\omega$", fontsize = 16)
+plt.ylabel("Scaled flux error")
+plt.grid(True, which = "both", alpha = 0.3)
 plt.legend()
 plt.tight_layout()
 plt.savefig(os.path.join(comparisons_dir, "Wronskian.png"), dpi = 200, format = 'png')
 plt.close()
+
+#New vs original extraction against the ODE reference, and extraction-point consistency
+extraction_report(model, comparisons_dir)
 
 with open(query_gbf_path, 'w', newline = '') as f:
     writer = csv.writer(f)
@@ -1979,7 +2221,7 @@ print(f"Loaded {len(numerical_results)} numerical results.")
 
 query_comparison_csv = os.path.join(comparisons_dir, "PINN_vs_Numerical_query.csv")
 query_comparison_omegas, query_pinn_gbfs, query_numerical_gbfs, query_absolute_differences, query_relative_differences = compare_pinn_to_numerical(dense_query_results,
-                    numerical_results, query_comparison_csv) 
+                    numerical_results, query_comparison_csv)
 save_simulation_comparison_plots(query_comparison_omegas, query_pinn_gbfs, query_numerical_gbfs, query_absolute_differences, query_relative_differences, "Dense Query Frequencies")
 
 plt.figure(figsize=[7, 5])
@@ -2031,7 +2273,7 @@ with open(result_file_path, 'w') as f:
 
     f.write(f"omega_min = {omega_min:.10f}\n")
     f.write(f"omega_max = {omega_max:.10f}\n")
-    f.write("training_omega_sampling = 60% uniform + 40% skewed beta distribution \n")
+    f.write(f"training_omega_sampling = {args.omega_sampling}\n")
     f.write(f"Adam_iterations = {adam_iterations}\n")
     f.write(f"Adam_base_points_per_epoch = {N_points}\n")
     f.write(f"rar_points_final = {rar_x.shape[0]}\n")
@@ -2064,7 +2306,7 @@ with open(result_file_path, 'w') as f:
     f.write(f"lbfgs_success = {lbfgs_success}\n")
 
 checkpoint = {'model_state_dict': model.state_dict(),
-            'model_architecture': {'in_channels': 2, 'out_channels': 4, 'hidden_channels': 64, 'hidden_layers': 3},
+            'model_architecture': {'in_channels': N_INPUTS, 'extra_input': args.extra_input, 'out_channels': 4, 'hidden_channels': 64, 'hidden_layers': 3},
             'activation_config': {'type': 'keerie_adaptive_tanh', 'n': 10.0},
             'omega_input_scaling': {'omega_min': omega_min, 'omega_max': omega_max},
             'rar_config': {'interval': RAR_INTERVAL, 'candidates': RAR_CANDIDATES, 'add_per_refinement': RAR_ADD, 'max_points': RAR_MAX, 'min_joint_distance': RAR_MIN_JOINT_DISTANCE,
@@ -2075,7 +2317,7 @@ checkpoint = {'model_state_dict': model.state_dict(),
             'x_max': x_max,
 
             'omega_range': {'min': omega_min, 'max': omega_max},
-            'training_omega_sampling': "60% uniform + 40% skewed beta distribution",
+            'training_omega_sampling': args.omega_sampling,
             'adam_base_points_per_epoch': N_points,
             'query_steps': args.query_steps,
             'diagnostic_omegas': diagnostic_omegas,
@@ -2104,8 +2346,8 @@ checkpoint = {'model_state_dict': model.state_dict(),
                 'frequency_curriculum': {
                     'type': 'global smoothstep transition in log-frequency',
                     'initial_lower_bound': float(args.curriculum_start * omega_max),
-                    'transition_start_progress': 0.10,
-                    'transition_end_progress': 0.60,
+                    'transition_start_progress': float(args.curriculum_begin),
+                    'transition_end_progress': float(args.curriculum_end),
                     'final_lower_bound': omega_min,
                 },
 
