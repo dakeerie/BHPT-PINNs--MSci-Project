@@ -53,7 +53,7 @@ from functools import lru_cache
 #Exact far-zone basis, Wronskian extraction and ODE reference 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 from gbf_reference import (far_zone_basis_at_x, extract_alpha_beta, scaled_flux_error, reference_gbf_ode,
-                           extraction_self_check)
+                           extraction_self_check, exact_u_at_x, two_term_basis_at_x, extract_alpha_beta_original)
 
 plt.rcParams.update({
     "font.family": "serif",
@@ -87,6 +87,9 @@ parser.add_argument('--lowfreq_target', choices = ['asymptotic', 'coulomb'], def
 parser.add_argument('--lowfreq_target_tol', type = float, default = None, help = 'If set, keep only low-frequency loss points whose target agrees with the ODE reference to this relative tolerance (checked at start-up)')
 parser.add_argument('--lowfreq_anneal_end', type = float, default = None, help = 'If set, cosine-anneal the low-frequency weight from lowfreq_weight to 0 by this Adam progress (weight 0 during L-BFGS)')
 parser.add_argument('--extra_input', choices = ['none', 'omega_r', 'log_y'], default = 'none', help = 'Third network input: omega_r = 2*zeta - 1 with zeta = omega r/(1 + omega r); log_y = 2*ln(y)/ln(1 - x_extract) - 1; none = inputs (x, omega) only')
+#Validation options
+parser.add_argument('--no_numerical_csv', action = 'store_true', help = 'Skip the comparison with ./Numerical/l{mode}/Output/numericalGBF.csv (the in-script references are still computed)')
+parser.add_argument('--pi_ustar_scale', type = float, default = 56.0, help = 'Product-integral cut-off u*_max = max(350, pi_ustar_scale/(M omega)); 0 gives the old fixed u*_max = 350')
 
 args = parser.parse_args()
 mass = args.mass
@@ -140,6 +143,9 @@ if args.lowfreq_target_tol is not None and args.lowfreq_target_tol <= 0:
 
 if args.lowfreq_anneal_end is not None and not (0.0 < args.lowfreq_anneal_end <= 1.0):
     raise ValueError("lowfreq_anneal_end must be in (0, 1].")
+
+if args.pi_ustar_scale < 0:
+    raise ValueError("pi_ustar_scale must be non-negative.")
 
 #Frequency schedule from high to low for continuation
 omega_min = float(args.omega_final)
@@ -986,9 +992,21 @@ def extraction_two_term(model, x_extraction, mass, mode, omega):
 
     return alpha, beta, prob, gbf
 
+def pi_ustar_max(Momega):
+    #Product-integral outer cut-off: the truncation error of the 1/r^2 potential tail grows as M*omega falls, so the
+    #cut-off is scaled as 1/(M omega); pi_ustar_scale = 0 restores the old fixed value of 350
+    if args.pi_ustar_scale <= 0:
+        return 350.0
+    return max(350.0, args.pi_ustar_scale/float(Momega))
+
 def extraction_report(model, out_dir, consistency_every = 5):
-    #Trained-PINN GBF from the new and original extraction vs the ODE reference on the query grid, plus a check that the
-    #new extraction gives the same GBF at extraction points inside x_max (x = 1 - (1 - x_max)*f, f = 1.5, 2, 4)
+    #For every query frequency, compares the trained PINN with three independent numbers:
+    #  (A) numerical solution at x_max extracted with EXACTLY the same u1 basis and formula as the PINN
+    #      -> PINN/(A) - 1 is pure network error (any basis error cancels). Done for the new and the original two-term basis.
+    #  (B) product integral (no u1 basis at all, cut-off from pi_ustar_max)
+    #      -> (A)/(B) - 1 tests the u1 basis/extraction against an independent method
+    #  (C) ODE reference matched at a large radius (gbf_reference.reference_gbf_ode)
+    #plus extraction-point consistency of the PINN (x = 1 - (1 - x_max)*f, f = 1.5, 2, 4) and the scaled flux error
     os.makedirs(out_dir, exist_ok = True)
     omega_grid = np.logspace(np.log10(omega_min), np.log10(omega_max), args.query_steps)
     x_check = [xe for xe in (1.0 - (1.0 - x_max)*f for f in (1.5, 2.0, 4.0)) if xe > 0.5]
@@ -996,21 +1014,42 @@ def extraction_report(model, out_dir, consistency_every = 5):
     rows = []
     for i, omega in enumerate(omega_grid):
         Mw = mass*float(omega)
-        gbf_ref = reference_gbf_ode(Mw, mode)["GBF"]
-        alpha_new, beta_new, _, gbf_new = extraction(model, x_max, mass, mode, float(omega))
 
+        #PINN, new and original extraction
+        alpha_new, beta_new, _, gbf_new = extraction(model, x_max, mass, mode, float(omega))
         try:
             gbf_old = extraction_two_term(model, x_max, mass, mode, float(omega))[3]
         except FloatingPointError:
             gbf_old = np.nan
+
+        #(A) numerical u(x_max), u'(x_max) from horizon integration, extracted with the PINN's own bases and formulas
+        u_num, du_num = exact_u_at_x(x_max, Mw, mode)
+        u1, du1 = extraction_basis(float(x_max), Mw)
+        gbf_num_new = 1.0/abs(extract_alpha_beta(u_num, du_num, u1, du1, x_max, Mw)[0])**2
+        u1_old, du1_old = two_term_basis_at_x(x_max, Mw, mode)
+        gbf_num_old = 1.0/abs(extract_alpha_beta_original(u_num, du_num, u1_old, du1_old, x_max, Mw)[0])**2
+
+        #(B) product integral and (C) ODE reference
+        ustar_max = pi_ustar_max(Mw)
+        gbf_pi = product_integral_GBF(Mw, mode, ustar_min = -50.0, ustar_max = ustar_max, N = int(round((ustar_max + 50.0)/0.04)))[0]
+        gbf_ref = reference_gbf_ode(Mw, mode)["GBF"]
 
         spread = np.nan
         if x_check and (i % consistency_every == 0 or i == len(omega_grid) - 1):
             gbf_alt = [extraction(model, xe, mass, mode, float(omega))[3] for xe in x_check]
             spread = max(abs(gv/gbf_new - 1.0) for gv in gbf_alt)
 
-        rows.append({"omega": float(omega), "Momega": Mw, "GBF_reference": gbf_ref, "GBF_new": gbf_new, "GBF_original": gbf_old,
-                     "rel_error_new": abs(gbf_new - gbf_ref)/gbf_ref, "rel_error_original": abs(gbf_old - gbf_ref)/gbf_ref,
+        rows.append({"omega": float(omega), "Momega": Mw,
+                     "GBF_PINN_new": gbf_new, "GBF_PINN_two_term": gbf_old,
+                     "GBF_numerical_same_u1_new": gbf_num_new, "GBF_numerical_same_u1_two_term": gbf_num_old,
+                     "GBF_product_integral": gbf_pi, "GBF_reference": gbf_ref, "pi_ustar_max": ustar_max,
+                     "network_error_new": abs(gbf_new/gbf_num_new - 1.0),
+                     "network_error_two_term": abs(gbf_old/gbf_num_old - 1.0),
+                     "basis_vs_PI_new": abs(gbf_num_new/gbf_pi - 1.0),
+                     "basis_vs_PI_two_term": abs(gbf_num_old/gbf_pi - 1.0),
+                     "PINN_vs_PI_new": abs(gbf_new/gbf_pi - 1.0),
+                     "PI_vs_reference": abs(gbf_pi/gbf_ref - 1.0),
+                     "rel_error_new": abs(gbf_new/gbf_ref - 1.0), "rel_error_original": abs(gbf_old/gbf_ref - 1.0),
                      "scaled_flux_error_new": scaled_flux_error(alpha_new, beta_new), "x_extract_spread": spread})
 
     report_csv = os.path.join(out_dir, "extraction_report.csv")
@@ -1020,30 +1059,37 @@ def extraction_report(model, out_dir, consistency_every = 5):
         for r in rows:
             writer.writerow([f"{v:.12e}" for v in r.values()])
 
-    Mw = np.array([r["Momega"] for r in rows])
-    err_new = np.array([r["rel_error_new"] for r in rows])
-    err_old = np.array([r["rel_error_original"] for r in rows])
-    spread = np.array([r["x_extract_spread"] for r in rows])
-    flux = np.abs(np.array([r["scaled_flux_error_new"] for r in rows]))
+    col = lambda key: np.array([r[key] for r in rows])
+    floor = lambda v: np.maximum(v, 1e-17)
+    Mw = col("Momega")
+    spread = col("x_extract_spread")
 
-    fig, axes = plt.subplots(2, 2, figsize = (13, 9))
-    axes[0, 0].loglog(Mw, [r["GBF_reference"] for r in rows], label = "ODE reference")
-    axes[0, 0].loglog(Mw, [r["GBF_new"] for r in rows], "--", label = "PINN, new extraction")
-    axes[0, 0].loglog(Mw, [r["GBF_original"] for r in rows], ":", label = "PINN, original extraction")
+    fig, axes = plt.subplots(2, 3, figsize = (18, 9))
+    axes[0, 0].loglog(Mw, col("GBF_product_integral"), label = "(B) product integral")
+    axes[0, 0].loglog(Mw, col("GBF_numerical_same_u1_new"), "--", label = "(A) numerical, same u1")
+    axes[0, 0].loglog(Mw, col("GBF_PINN_new"), ":", label = "PINN, new extraction")
+    axes[0, 0].loglog(Mw, col("GBF_PINN_two_term"), "-.", label = "PINN, two-term extraction")
     axes[0, 0].set(ylabel = r"$\Gamma$", title = "GBF")
-    axes[0, 1].loglog(Mw, np.maximum(err_new, 1e-17), label = "new extraction")
-    axes[0, 1].loglog(Mw, np.maximum(err_old, 1e-17), label = "original extraction")
-    axes[0, 1].set(ylabel = "relative error vs reference", title = "PINN GBF error")
+    axes[0, 1].loglog(Mw, floor(col("network_error_new")), label = "new basis")
+    axes[0, 1].loglog(Mw, floor(col("network_error_two_term")), label = "two-term basis")
+    axes[0, 1].set(ylabel = "|PINN/(A) - 1|", title = "Pure network error (same u1 for PINN and numerical)")
+    axes[0, 2].loglog(Mw, floor(col("basis_vs_PI_new")), label = "(A) new basis vs PI")
+    axes[0, 2].loglog(Mw, floor(col("basis_vs_PI_two_term")), label = "(A) two-term basis vs PI")
+    axes[0, 2].loglog(Mw, floor(col("PI_vs_reference")), ":", label = "PI vs ODE reference (PI accuracy)")
+    axes[0, 2].set(ylabel = "relative difference", title = "u1 basis vs product integral")
+    axes[1, 0].loglog(Mw, floor(col("PINN_vs_PI_new")), label = "PINN (new) vs PI")
+    axes[1, 0].loglog(Mw, floor(col("rel_error_new")), "--", label = "PINN (new) vs ODE reference")
+    axes[1, 0].set(ylabel = "relative difference", title = "Total PINN error")
     ok = np.isfinite(spread)
-    axes[1, 0].loglog(Mw[ok], np.maximum(spread[ok], 1e-17), "o-")
-    axes[1, 0].set(ylabel = r"max$_x$ |$\Gamma(x)/\Gamma(x_{\max})$ - 1|", title = "Extraction-point consistency (new)")
-    axes[1, 1].loglog(Mw, np.maximum(flux, 1e-17))
-    axes[1, 1].set(ylabel = r"$|\,|\alpha|^2-|\beta|^2-1\,|/(|\alpha|^2+|\beta|^2)$", title = "Scaled flux error (new)")
+    axes[1, 1].loglog(Mw[ok], floor(spread[ok]), "o-")
+    axes[1, 1].set(ylabel = r"max$_x$ |$\Gamma(x)/\Gamma(x_{\max})$ - 1|", title = "Extraction-point consistency (PINN, new)")
+    axes[1, 2].loglog(Mw, floor(np.abs(col("scaled_flux_error_new"))))
+    axes[1, 2].set(ylabel = r"$|\,|\alpha|^2-|\beta|^2-1\,|/(|\alpha|^2+|\beta|^2)$", title = "Scaled flux error (PINN, new)")
     for ax in axes.flat:
         ax.set_xlabel(r"$M\omega$")
         ax.grid(True, which = "both", alpha = 0.3)
-    for ax in (axes[0, 0], axes[0, 1]):
-        ax.legend()
+    for ax in (axes[0, 0], axes[0, 1], axes[0, 2], axes[1, 0]):
+        ax.legend(fontsize = 8)
     fig.suptitle(rf"Extraction report, $\ell = {mode}$, $x_{{\max}} = {x_max:g}$")
     fig.tight_layout()
     fig.savefig(os.path.join(out_dir, "extraction_report.png"), dpi = 200)
@@ -1051,9 +1097,16 @@ def extraction_report(model, out_dir, consistency_every = 5):
 
     for label, mask in (("M*omega < 0.05", Mw < 0.05), ("M*omega >= 0.05", Mw >= 0.05)):
         if mask.any():
-            print(f"{label}: median|max rel. error  new = {np.nanmedian(err_new[mask]):.2e} | {np.nanmax(err_new[mask]):.2e}, "
-                  f"original = {np.nanmedian(err_old[mask]):.2e} | {np.nanmax(err_old[mask]):.2e}", flush = True)
-    print(f"Max x_extract spread (new) = {np.nanmax(spread):.2e} | max |scaled flux error| (new) = {np.nanmax(flux):.2e}", flush = True)
+            print(f"{label} (median | max):", flush = True)
+            for key, text in (("network_error_new", "  pure network error, new basis      "),
+                              ("network_error_two_term", "  pure network error, two-term basis "),
+                              ("basis_vs_PI_new", "  numerical+new basis vs PI          "),
+                              ("basis_vs_PI_two_term", "  numerical+two-term basis vs PI     "),
+                              ("PINN_vs_PI_new", "  PINN (new) vs PI                   "),
+                              ("PI_vs_reference", "  PI vs ODE reference                ")):
+                values = col(key)[mask]
+                print(f"{text} {np.nanmedian(values):.2e} | {np.nanmax(values):.2e}", flush = True)
+    print(f"Max x_extract spread (PINN, new) = {np.nanmax(spread):.2e} | max |scaled flux error| = {np.nanmax(np.abs(col('scaled_flux_error_new'))):.2e}", flush = True)
     print(f"Saved extraction report to {report_csv}", flush = True)
     return rows
 
@@ -2122,8 +2175,8 @@ plt.tight_layout()
 plt.savefig(os.path.join(comparisons_dir, "Wronskian.png"), dpi = 200, format = 'png')
 plt.close()
 
-#New vs original extraction against the ODE reference, and extraction-point consistency
-extraction_report(model, comparisons_dir)
+#PINN vs (A) numerical with the same u1, (B) product integral and (C) ODE reference; extraction-point consistency
+report_rows = extraction_report(model, comparisons_dir)
 
 with open(query_gbf_path, 'w', newline = '') as f:
     writer = csv.writer(f)
@@ -2211,32 +2264,43 @@ for omega_plot in diagnostic_omegas:
     plt.savefig(os.path.join(final_plot_omega_dir, 'u.png'), format='png')
     plt.close()
 
-numerical_csv_path = f'./Numerical/l{mode}/Output/numericalGBF.csv'
+if args.no_numerical_csv:
+    #External solver skipped: comparison arrays are filled with NaN so the later summaries and checkpoint still work
+    print("Skipping the numerical CSV comparison (--no_numerical_csv); in-script references are in extraction_report.", flush = True)
+    numerical_results = {}
+    query_comparison_omegas = dense_query_omegas.copy()
+    query_pinn_gbfs = dense_query_gbfs.copy()
+    query_numerical_gbfs = np.full_like(dense_query_gbfs, np.nan)
+    query_absolute_differences = np.full_like(dense_query_gbfs, np.nan)
+    query_relative_differences = np.full_like(dense_query_gbfs, np.nan)
 
-print(f"Loading numerical GBF data from: {numerical_csv_path}")
+else:
+    numerical_csv_path = f'./Numerical/l{mode}/Output/numericalGBF.csv'
 
-numerical_results = load_numerical_gbf(numerical_csv_path, mass, mode, x_max)
+    print(f"Loading numerical GBF data from: {numerical_csv_path}")
 
-print(f"Loaded {len(numerical_results)} numerical results.")
+    numerical_results = load_numerical_gbf(numerical_csv_path, mass, mode, x_max)
 
-query_comparison_csv = os.path.join(comparisons_dir, "PINN_vs_Numerical_query.csv")
-query_comparison_omegas, query_pinn_gbfs, query_numerical_gbfs, query_absolute_differences, query_relative_differences = compare_pinn_to_numerical(dense_query_results,
-                    numerical_results, query_comparison_csv)
-save_simulation_comparison_plots(query_comparison_omegas, query_pinn_gbfs, query_numerical_gbfs, query_absolute_differences, query_relative_differences, "Dense Query Frequencies")
+    print(f"Loaded {len(numerical_results)} numerical results.")
 
-plt.figure(figsize=[7, 5])
+    query_comparison_csv = os.path.join(comparisons_dir, "PINN_vs_Numerical_query.csv")
+    query_comparison_omegas, query_pinn_gbfs, query_numerical_gbfs, query_absolute_differences, query_relative_differences = compare_pinn_to_numerical(dense_query_results,
+                        numerical_results, query_comparison_csv)
+    save_simulation_comparison_plots(query_comparison_omegas, query_pinn_gbfs, query_numerical_gbfs, query_absolute_differences, query_relative_differences, "Dense Query Frequencies")
 
-plt.plot(query_comparison_omegas, query_numerical_gbfs, label='Numerical')
-plt.plot(query_comparison_omegas, query_pinn_gbfs, 'x-', label='Two-input PINN')
-plt.xlabel(r'$\omega$', fontsize = 16)
-plt.ylabel(r'$\Gamma(\omega)$', fontsize = 16)
-plt.title(f'Grey-Body Factor, l = {mode}')
-plt.grid()
-plt.legend()
-plt.tight_layout()
+    plt.figure(figsize=[7, 5])
 
-plt.savefig(os.path.join(comparisons_dir, 'Final_GBF_Comparison_query.png'), format='png')
-plt.close()
+    plt.plot(query_comparison_omegas, query_numerical_gbfs, label='Numerical')
+    plt.plot(query_comparison_omegas, query_pinn_gbfs, 'x-', label='Two-input PINN')
+    plt.xlabel(r'$\omega$', fontsize = 16)
+    plt.ylabel(r'$\Gamma(\omega)$', fontsize = 16)
+    plt.title(f'Grey-Body Factor, l = {mode}')
+    plt.grid()
+    plt.legend()
+    plt.tight_layout()
+
+    plt.savefig(os.path.join(comparisons_dir, 'Final_GBF_Comparison_query.png'), format='png')
+    plt.close()
 
 final_alpha, final_beta, final_prob, final_gbf = extraction(model, x_max, mass, mode, monitor_omega)
 
@@ -2390,19 +2454,9 @@ print(f"Checkpoint saved to {checkpoint_path}", flush = True)
 print("Calculating GBF via product integral approach...")
 print("-"*60)
 
-Momega_values = mass*query_comparison_omegas
-
-PI_T_list = []
-PI_unitarity_list = []
-
-for x in Momega_values:
-    T_PI, alpha_PI, beta_PI = product_integral_GBF(x, mode = mode, ustar_max = 350.0, N = 10000)
-    PI_T_list.append(T_PI)
-    unitarity = np.abs(alpha_PI)**2 - np.abs(beta_PI)**2
-    PI_unitarity_list.append(unitarity)
-
+#Product-integral values were computed in extraction_report on the same grid (cut-off u*_max = max(350, pi_ustar_scale/(M omega)))
+PI_T_list = [r["GBF_product_integral"] for r in report_rows]
 PI_T = np.asarray(PI_T_list)
-PI_unitarity = np.asarray(PI_unitarity_list)
 abs_diff = np.abs(query_pinn_gbfs - PI_T)
 rel_diff = []
 
