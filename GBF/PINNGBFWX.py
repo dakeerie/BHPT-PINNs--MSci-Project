@@ -90,6 +90,7 @@ parser.add_argument('--extra_input', choices = ['none', 'omega_r', 'log_y'], def
 #Validation options
 parser.add_argument('--no_numerical_csv', action = 'store_true', help = 'Skip the comparison with ./Numerical/l{mode}/Output/numericalGBF.csv (the in-script references are still computed)')
 parser.add_argument('--pi_ustar_scale', type = float, default = 56.0, help = 'Product-integral cut-off u*_max = max(350, pi_ustar_scale/(M omega)); 0 gives the old fixed u*_max = 350')
+parser.add_argument('--run_tag', type = str, default = '', help = 'Label appended to the output folder name, so parallel runs with the same mass/x/omega/steps do not collide')
 
 args = parser.parse_args()
 mass = args.mass
@@ -1605,6 +1606,8 @@ model = Model(N_INPUTS, 4, 64, num_hidden_layers = 3).to(device = device, dtype 
 #Make various directories for saving results
 run_id = datetime.now().strftime("%Y%m%d_%H%M%S")
 run_name = f"{run_id}_M{mass:g}_x{x_max:g}_w{omega_min:g}-{omega_max:g}_adam{args.adam_steps}_lbfgs{args.lbfgs_steps}"
+if args.run_tag:
+    run_name += "_" + "".join(c if (c.isalnum() or c in "-_.") else "_" for c in args.run_tag)
 
 if args.reextract_checkpoint is not None:
     #Re-extraction outputs go next to the checkpoint being analysed
