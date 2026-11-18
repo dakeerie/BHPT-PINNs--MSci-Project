@@ -3,7 +3,7 @@ set -euo pipefail
 
 # Wrapper for:
 #   1. NumericalGBF.py (optional; writes ./Numerical/l{mode}/Output/numericalGBF.csv)
-#   2. the PINN script 
+#   2. the PINN script (PINNGBFWX.py by default)
 #
 # All options are passed as named flags (--mass 0.5 --mode 2 ...) and forwarded unchanged to the PINN.
 # The shared ones (mass, mode, x_extract, omega_start, omega_final, query_steps) are also given to NumericalGBF.py.
@@ -11,19 +11,21 @@ set -euo pipefail
 #   --run_numerical yes|no   yes (default): run NumericalGBF.py first and compare the PINN against its CSV
 #                            no: skip it and pass --no_numerical_csv to the PINN
 #
-# Environment overrides: PYTHON_BIN, PINN_SCRIPT, NUMERICAL_SCRIPT, REQUIRE_GPU (1 = refuse to run on CPU).
+# Environment overrides: PYTHON_BIN, PINN_SCRIPT, NUMERICAL_SCRIPT, REQUIRE_GPU (1 = refuse to run on CPU),
+# GBF_BASIS_VERBOSE (1 = gbf_reference.py prints every numerical inward u1 basis integration).
 
 # Run from the project directory containing this wrapper.
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 cd "$SCRIPT_DIR"
 
-# Change this if you need a specific Conda/Python executable.
-PYTHON_BIN="${PYTHON_BIN:-/home/2665592k/.conda/envs/pinns-gpu/bin/python}"
+# CUDA 12.8 PyTorch build: has kernels for the RTX 2080 Ti (sm_75), 3090 (sm_86) and 5090 (sm_120) nodes.
+PYTHON_BIN="${PYTHON_BIN:-/scratch/wiay/danielk/venvs/pinns-gpu-cu128/bin/python}"
 PINN_SCRIPT="${PINN_SCRIPT:-PINNGBFWX.py}"
 NUMERICAL_SCRIPT="${NUMERICAL_SCRIPT:-NumericalGBF.py}"
 REQUIRE_GPU="${REQUIRE_GPU:-1}"
 
 echo "Python: $PYTHON_BIN"
+echo "GBF_BASIS_VERBOSE: ${GBF_BASIS_VERBOSE:-0}"
 
 REQUIRE_GPU="$REQUIRE_GPU" "$PYTHON_BIN" - <<'PY'
 import os
@@ -41,13 +43,17 @@ else:
     print("GPU:", torch.cuda.get_device_name(0))
 PY
 
-# The PINN imports gbf_reference.py from its own directory
+# The PINN imports gbf_reference.py (including the basis-tracking functions) from its own directory
 for required in "$PINN_SCRIPT" gbf_reference.py; do
     if [[ ! -f "$required" ]]; then
         echo "ERROR: $required not found in $SCRIPT_DIR" >&2
         exit 2
     fi
 done
+if ! grep -q "def basis_tracking_summary" gbf_reference.py; then
+    echo "ERROR: gbf_reference.py has no basis-tracking functions; upload the version that matches $PINN_SCRIPT" >&2
+    exit 2
+fi
 
 # -----------------------------
 # Parse named options
@@ -110,5 +116,5 @@ echo "============================================================"
 "$PYTHON_BIN" "$PINN_SCRIPT" "${PINN_ARGS[@]}"
 
 echo "============================================================"
-echo "Validation run complete."
+echo "Run complete."
 echo "============================================================"
