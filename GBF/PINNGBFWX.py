@@ -2119,7 +2119,7 @@ T_q = 1/alpha_q
 m = Mw_q <= 0.1 #Low frequency asymptotic mask
 
 fig, (a1, a2) = plt.subplots(2, 1, figsize = [7, 7], sharex = True)
-fig.suptitle(rf'Bode plot of $T(\omega)$, $\ell = {mode}')
+fig.suptitle(rf'Bode plot of $T(\omega)$, $\ell$ = {mode}')
 a1.semilogx(Mw_q, 20*np.log10(np.abs(T_q)))
 a2.semilogx(Mw_q, np.degrees(np.unwrap(np.angle(T_q))))
 a1.semilogx(Mw_q[m], 10*np.log10(low_frequency_GBF_coeff(mode)) + 20*(mode + 1)*np.log10(Mw_q[m]), '--', label = rf'$\sqrt{{C_\ell}}(M\omega)^{{\ell + 1}}$: {20*(mode + 1)} dB/decade')
