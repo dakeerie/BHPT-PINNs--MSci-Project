@@ -1,0 +1,15 @@
+Warm-start RAR
+l = 2
+omega = 1.2000
+final ODE loss = 4.8897e-06
+final flux loss = 2.3100e-08
+alpha_re = -0.4259519835
+alpha_im = 0.9050670979
+beta_re = 0.0002379373
+beta_im = 0.0256418732
+T_re = -0.4257044177
+T_im = -0.9045410676
+R_re = 0.0230928364
+R_im = -0.0111310828
+Prob = 0.9999239816
+GBF = 9.9941879417e-01
