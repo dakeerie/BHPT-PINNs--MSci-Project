@@ -1231,6 +1231,20 @@ def zerilli_from_RW(mass, mode, omega, alpha, beta):
 
     return T, R_Z
 
+def pipeline_grid(mass, omega, x_lo = 1e-6, x_hi = None, pts_per_wavelength = 40, n_min = 2000):
+    #Uniform grid in r_* as oscillations are uniform in r_*
+    x_hi = x_max if x_hi is None else x_hi
+    rstar = lambda x: 2*mass/(1 - x) + 2*mass*np.log(x/(1 - x))
+    rs_lo, rs_hi = rstar(x_lo), rstar(x_hi)
+    #Shortest wavelength in r_* is pi/omega from e^{2 i omega r_*} term
+    n = max(n_min, int(np.ceil(pts_per_wavelength*omega*(rs_hi - rs_lo)/np.pi) + 1))
+    rstar_grid = np.linspace(rs_lo, rs_hi, n)
+    rho = u_from_ustar(rstar_grid/(2*mass))
+    x_grid = (rho - 1.0)/rho
+
+    return x_grid, 2*mass*rho, rstar_grid 
+
+
 def query_wavefunction(model, mass, mode, omega_query, x_values):
     #Queries pretrained PINN for wavefunctions at different frequencies within the training range
     if not t.is_tensor(x_values):
@@ -1274,7 +1288,7 @@ def save_training_diagnostics(model, epoch_number, omega):
     plt.yscale('log')
     plt.xlabel('Epoch', fontsize = 16)
     plt.ylabel('Loss', fontsize = 16)
-    plt.title(f'Two-input PINN Loss Curves, l = {mode}'
+    plt.title(rf'PINN Loss Curves, $\ell$ = {mode}'
             '\n'
             f'Residual Normalisation: {args.res_norm}', fontsize = 16)
     plt.grid()
@@ -1286,7 +1300,7 @@ def save_training_diagnostics(model, epoch_number, omega):
     diagnostic_dir_omega = os.path.join(diagnostic_dir, f'omega{omega:.4f}')
     os.makedirs(diagnostic_dir_omega, exist_ok = True)
 
-    diagnostic = evaluate_fixed_frequency(model, mass, mode, omega, x_diagnostic)
+    diagnostic = evaluate_fixed_frequency(model, mass, mode, omega, pipeline_grid(mass, omega)[0])
 
     flux_dir_omega = os.path.join(diagnostic_dir_omega, "Flux")
     residual_dir_omega = os.path.join(diagnostic_dir_omega, "Residuals")
@@ -1299,7 +1313,7 @@ def save_training_diagnostics(model, epoch_number, omega):
     plt.plot(diagnostic['x'], diagnostic['res_im'], label = r'$\Im(R_{ODE})$')
     plt.xlabel('x', fontsize = 16)
     plt.ylabel('ODE Residual', fontsize = 16)
-    plt.title(f'ODE Residual, l = {mode}, omega = {omega:.4f}')
+    plt.title(rf'ODE Residual, $\ell$ = {mode}, $\omega$ = {omega:.4f}')
     plt.grid()
     plt.legend()
     plt.tight_layout()
@@ -1312,7 +1326,7 @@ def save_training_diagnostics(model, epoch_number, omega):
     plt.axhline(0.0, linestyle = '--', label = 'Target')
     plt.xlabel('x', fontsize = 16)
     plt.ylabel('Flux Residual', fontsize = 16)
-    plt.title(f'Flux Residual, l = {mode}, omega = {omega:.4f}')
+    plt.title(rf'Flux Residual, $\ell$ = {mode}, $\omega$ = {omega:.4f}')
     plt.grid()
     plt.legend()
     plt.tight_layout()
@@ -1331,7 +1345,7 @@ def save_training_diagnostics(model, epoch_number, omega):
     os.makedirs(wavefunction_dir, exist_ok = True)
     os.makedirs(pq_dir, exist_ok = True)
 
-    x_values, u_re, u_im, P_re, P_im, Q_re, Q_im = query_wavefunction(model, mass, mode, omega, x_diagnostic)
+    x_values, u_re, u_im, P_re, P_im, Q_re, Q_im = query_wavefunction(model, mass, mode, omega, pipeline_grid(mass, omega)[0])
 
     #Plots of different wave function components for the frequency passed in function call
     plt.figure(figsize = [7,5])
@@ -1339,7 +1353,7 @@ def save_training_diagnostics(model, epoch_number, omega):
     plt.plot(x_values, u_im, label = 'Im(u)')
     plt.xlabel(r'$x$', fontsize = 16)
     plt.ylabel(r"$u(x, \omega)$", fontsize = 16)
-    plt.title(f"Wavefunction, l = {mode}, omega = {omega:.4f}"
+    plt.title(rf"Wavefunction, $\ell$ = {mode}, $\omega$ = {omega:.4f}"
             "\n"
             f"Epoch: {epoch_number}")
     plt.grid()
@@ -1355,7 +1369,7 @@ def save_training_diagnostics(model, epoch_number, omega):
     plt.plot(x_values, Q_im, label = 'Im(Q)')
     plt.xlabel('x', fontsize = 16)
     plt.ylabel('P & Q', fontsize = 16)
-    plt.title(f"P & Q, l = {mode}, omega = {omega:.4f}"
+    plt.title(rf"P & Q, $\ell$ = {mode}, $\omega$ = {omega:.4f}"
             "\n"
             f"Epoch: {epoch_number}")
     plt.grid()
@@ -1618,21 +1632,23 @@ else:
     #Output folders
     base_path = os.path.join("./GBFWXData", f"l{mode}", run_name)
 diagnostic_dir = os.path.join(base_path, 'diagnostics')
-envelope_dir = os.path.join(diagnostic_dir, 'Envelope')
-LRA_dir = os.path.join(diagnostic_dir, 'LRannealing')
+envelope_dir = os.path.join(diagnostic_dir, 'envelope')
+clipping_dir = os.path.join(diagnostic_dir, 'clipping')
 results_dir = os.path.join(base_path, 'results')
 comparisons_dir = os.path.join(base_path, 'comparisons')
 final_plots_dir = os.path.join(diagnostic_dir, "final")
 rar_dir = os.path.join(diagnostic_dir, "RAR")
+network_dir = os.path.join(base_path, "network")
 
 os.makedirs(base_path, exist_ok=True)
 os.makedirs(diagnostic_dir, exist_ok = True)
 os.makedirs(envelope_dir, exist_ok = True)
-os.makedirs(LRA_dir, exist_ok = True)
+os.makedirs(clipping_dir, exist_ok = True)
 os.makedirs(results_dir, exist_ok = True)
 os.makedirs(comparisons_dir, exist_ok = True)
 os.makedirs(final_plots_dir, exist_ok = True)
 os.makedirs(rar_dir, exist_ok = True)
+os.makedirs(network_dir, exist_ok = True)
 
 #Amplitude envelope troubleshooting
 plot_amplitude_envelope_diagnostics(mass, mode, x_max, omega_min, omega_max)
@@ -1763,7 +1779,7 @@ run_config = {
     "diagnostic_omegas": diagnostic_omegas,
 }
 
-config_path = os.path.join(base_path, "config.json")
+config_path = os.path.join(network_dir, "config.json")
 with open(config_path, "w") as f:
     json.dump(run_config, f, indent=2)
 
@@ -1910,7 +1926,7 @@ for epoch in range(adam_iterations):
 print("Adam training complete. Switching to L-BFGS:", flush = True)
 print("="*60)
 
-adam_checkpoint_path = os.path.join(base_path, "after_adam.pth")
+adam_checkpoint_path = os.path.join(network_dir, "after_adam.pth")
 
 #Quick save Adam trained network
 atomic_torch_save({
@@ -1942,7 +1958,7 @@ ax.set_ylabel("Pre-clip Gradient Norm", fontsize = 16)
 ax.grid(True)
 ax.legend()
 fig.tight_layout()
-fig.savefig(os.path.join(diagnostic_dir, "gradient_norm.png"), format = 'png', dpi = 200)
+fig.savefig(os.path.join(clipping_dir, "gradient_norm.png"), format = 'png', dpi = 200)
 plt.close(fig)
 
 window = 500
@@ -1958,7 +1974,7 @@ if len(clipped_array) >= window:
     ax.set_ylabel('Fraction clipped in last 500 epochs')
     ax.grid(True)
     fig.tight_layout()
-    fig.savefig(os.path.join(diagnostic_dir, "gradient_clipping_fraction.png"), format = 'png', dpi = 200)
+    fig.savefig(os.path.join(clipping_dir, "gradient_clipping_fraction.png"), format = 'png', dpi = 200)
     plt.close(fig)
 
 lbfgs_steps_completed = 0
@@ -2049,7 +2065,7 @@ for epoch in range(lbfgs_iterations):
             save_training_diagnostics(model, epoch_number = global_epoch + 1, omega = omega_diag)
 
 
-checkpoint_path = os.path.join(base_path, "trained_model.pth")
+checkpoint_path = os.path.join(network_dir, "trained_model.pth")
 #Save final trained model
 final_model_checkpoint = {
     "checkpoint_version": 1,
@@ -2097,6 +2113,25 @@ query_scaled_flux = np.array([scaled_flux_error(result['alpha'], result['beta'])
 
 print(f"Maximum scaled flux-identity error: {np.max(np.abs(query_scaled_flux)):.6e}", flush = True)
 
+Mw_q = mass*dense_query_omegas
+alpha_q = np.array([r['alpha'] for r in dense_query_results])
+T_q = 1/alpha_q
+m = Mw_q <= 0.1 #Low frequency asymptotic mask
+
+fig, (a1, a2) = plt.subplots(2, 1, figsize = [7, 7], sharex = True)
+fig.suptitle(rf'Bode plot of $T(\omega)$, $\ell = {mode}')
+a1.semilogx(Mw_q, 20*np.log10(np.abs(T_q)))
+a2.semilogx(Mw_q, np.degrees(np.unwrap(np.angle(T_q))))
+a1.semilogx(Mw_q[x], 10*np.log10(low_frequency_GBF_coeff(mode)) + 20*(mode + 1)*np.log10(Mw_q[m]), '--', label = rf'$\sqrt{{C_\ell}}(M\omega)^{{\ell + 1}}$: {20*(mode + 1)} dB/decade')
+a1.set_ylabel(r'$20 \log_{10} |T|$ (dB)')
+a2.set_ylabel(r'$\arg(T)$ (deg)')
+a2.set_xlabel(r'$M \omega$')
+for a in (a1, a2):
+    a.grid(True, which = 'both')
+fig.tight_layout()
+fig.savefig(os.path.join(results_dir, 'TBode.png'), format = 'png')
+plt.close(fig)
+
 plt.figure(figsize = (7, 5))
 plt.loglog(mass*dense_query_omegas, np.maximum(np.abs(query_scaled_flux), 1e-17), label = r"$|\,|\alpha|^2 - |\beta|^2 - 1\,|/(|\alpha|^2 + |\beta|^2)$")
 plt.xlabel(r"$M\omega$", fontsize = 16)
@@ -2104,7 +2139,7 @@ plt.ylabel("Scaled flux error")
 plt.grid(True, which = "both", alpha = 0.3)
 plt.legend()
 plt.tight_layout()
-plt.savefig(os.path.join(comparisons_dir, "Wronskian.png"), dpi = 200, format = 'png')
+plt.savefig(os.path.join(results_dir, "scaled_flux_res.png"), dpi = 200, format = 'png')
 plt.close()
 
 #PINN vs (A) numerical with the same u1, (B) product integral and (C) ODE reference; extraction-point consistency
@@ -2121,34 +2156,33 @@ with open(query_gbf_path, 'w', newline = '') as f:
 
 
 plt.figure(figsize = [7, 5])
-plt.plot(mass*dense_query_omegas, dense_query_gbfs, label = 'Two-input PINN')
+plt.plot(mass*dense_query_omegas, dense_query_gbfs, label = 'PINN')
 plt.xlabel(r'$M \omega$', fontsize = 16)
 plt.ylabel(r"$\Gamma(M \omega)$", fontsize = 16)
-plt.title(f"Two-input PINN GBF, l = {mode}", fontsize = 16)
+plt.title(rf"PINN GBF, $\ell$ = {mode}", fontsize = 16)
 plt.grid()
 plt.legend()
 plt.tight_layout()
-plt.savefig(os.path.join(base_path, "WXPINN_GBF.png"), format = 'png')
+plt.savefig(os.path.join(results_dir, "WXPINN_GBF.png"), format = 'png')
 plt.close()
 
 print("Preparing final post-training diagnostics...")
 print("="*60)
 
 for omega_plot in diagnostic_omegas:
-    #Ansatz components for 
+    
     final_plot_omega_dir = os.path.join(final_plots_dir, f"omega{omega_plot:.4f}")
     os.makedirs(final_plot_omega_dir, exist_ok = True)
 
-    x_values, u_re, u_im, P_re, P_im, Q_re, Q_im = query_wavefunction(model, mass, mode,  omega_plot, x_diagnostic)
-
+    x_grid, r_plot, rstar_plot = pipeline_grid(mass, omega_plot)
+    x_values, u_re, u_im, P_re, P_im, Q_re, Q_im = query_wavefunction(model, mass, mode,  omega_plot, x_grid)
     x_plot = x_values
-    r_plot = 2*mass/(1 - x_plot)
 
     plt.figure(figsize=[14, 6])
 
     plt.subplot(1, 2, 1)
     plt.suptitle("Post-training Direct Neural Network Outputs\n"
-                f"P & Q for l = {mode}, omega = {omega_plot:.4f}")
+                rf"P & Q for $\ell$ = {mode}, omega = {omega_plot:.4f}")
     plt.plot(x_plot, P_re, label='Re(P)')
     plt.plot(x_plot, P_im, label='Im(P)')
     plt.plot(x_plot, Q_re, label='Re(Q)')
@@ -2176,7 +2210,7 @@ for omega_plot in diagnostic_omegas:
 
     plt.subplot(1, 2, 1)
     plt.suptitle("Wave function u built via ansatz of P and Q\n"
-        r"$u = T_4(x) + x^5 E(x, \omega)[P + e^{2 i \omega r_*}Q]$" + f" for l = {mode}, omega = {omega_plot:.4f}")
+        r"$u = T_4(x) + x^5 E(x, \omega)[P + e^{2 i \omega r_*}Q]$" + rf" for $\ell$ = {mode}, omega = {omega_plot:.4f}")
     plt.plot(x_plot, u_re, label=r'$\Re(u_{NN})$')
     plt.plot(x_plot, u_im, label=r'$\Im(u_{NN})$')
     plt.xlabel('x', fontsize = 16)
@@ -2195,6 +2229,239 @@ for omega_plot in diagnostic_omegas:
     plt.tight_layout()
     plt.savefig(os.path.join(final_plot_omega_dir, 'u.png'), format='png')
     plt.close()
+
+    u_c = u_re + 1j*u_im
+    Psi = np.exp(-1j*omega_plot*rstar_plot)*u_c
+    f_r = 1 - 2*mass/r_plot
+
+    plt.figure(figsize = [16, 18])
+    plt.subplot(4, 2, 1)
+    plt.suptitle(rf'Wavefunction Pipeline for $M \omega$ = {mass*omega_plot:.4f}', fontsize = 18)
+    plt.title(r'PINN Output $P(x)$ & $Q(x)$', fontsize = 16)
+    plt.plot(x_plot, P_re, label='Re(P)')
+    plt.plot(x_plot, P_im, label='Im(P)')
+    plt.plot(x_plot, Q_re, label='Re(Q)')
+    plt.plot(x_plot, Q_im, label='Im(Q)')
+    plt.xlabel('x', fontsize = 16)
+    plt.ylabel('P and Q', fontsize = 16)
+    plt.legend()
+    plt.grid()
+
+    plt.subplot(4, 2, 2)
+    plt.title(r'PINN Output $P(r)$ & $Q(r)$', fontsize = 16)
+    plt.plot(r_plot/mass, P_re, label='Re(P)')
+    plt.plot(r_plot/mass, P_im, label='Im(P)')
+    plt.plot(r_plot/mass, Q_re, label='Re(Q)')
+    plt.plot(r_plot/mass, Q_im, label='Im(Q)')
+    plt.xscale('log')
+    plt.xlabel(r'$r/M$', fontsize = 16)
+    plt.ylabel(r'$P$ and $Q$', fontsize = 16)
+    plt.legend()
+    plt.grid()
+
+    plt.subplot(4, 2, 3)
+    plt.title(r'$u(x) = T_4 + E x^5 [P + e^{2 i \omega r_*} Q]$', fontsize = 16)
+    plt.plot(x_plot, u_re, label=r'$\Re(u_{NN})$')
+    plt.plot(x_plot, u_im, label=r'$\Im(u_{NN})$')
+    plt.xlabel(r'$x$', fontsize = 16)
+    plt.ylabel(r'$u(x)$', fontsize = 16)
+    plt.legend()
+    plt.grid()
+
+    plt.subplot(4, 2, 4)
+    plt.title(r'$u(r) = T_4 + E x^5 [P + e^{2 i \omega r_*} Q]$', fontsize = 16)
+    plt.plot(r_plot/mass, u_re, label=r'$\Re(u_{NN})$')
+    plt.plot(r_plot/mass, u_im, label=r'$\Im(u_{NN})$')
+    plt.xscale('log')
+    plt.xlabel(r'$r/M$', fontsize = 16)
+    plt.ylabel(r'$u(r)$', fontsize = 16)
+    plt.legend()
+    plt.grid()
+
+    plt.subplot(4, 2, 5)
+    plt.title(r'$\Psi(x) = e^{- i \omega r_*}u(x)$', fontsize = 16)
+    plt.plot(x_plot, Psi.real, label=r'$\Re(\Psi_{NN})$')
+    plt.plot(x_plot, Psi.imag, label=r'$\Im(\Psi_{NN})$')
+    plt.xlabel(r'$x$', fontsize = 16)
+    plt.ylabel(r'$\Psi(x)$', fontsize = 16)
+    plt.legend()
+    plt.grid()
+
+    plt.subplot(4, 2, 6)
+    plt.title(r'$\Psi(r) = e^{- i \omega r_*}u(r)$', fontsize = 16)
+    plt.plot(r_plot/mass, Psi.real, label=r'$\Re(\Psi_{NN})$')
+    plt.plot(r_plot/mass, Psi.imag, label=r'$\Im(\Psi_{NN})$')
+    plt.xscale('log')
+    plt.xlabel(r'$r/M$', fontsize = 16)
+    plt.ylabel(r'$\Psi(r)$', fontsize = 16)
+    plt.legend()
+    plt.grid()
+
+    h1 = r_plot*Psi/f_r
+
+    plt.subplot(4, 2, 7)
+    plt.title(r'$|h_1(x)| = |r(x) \Psi/f(r(x))|$', fontsize = 16)
+    plt.plot(x_plot, np.abs(h1), label=r'$|h_1|$')
+    plt.yscale('log')
+    plt.xlabel(r'$x$', fontsize = 16)
+    plt.ylabel(r'$h_1(x)$', fontsize = 16)
+    plt.legend()
+    plt.grid()
+
+    plt.subplot(4, 2, 8)
+    plt.title(r'$|h_1(r)| = |r \Psi/f(r)|$', fontsize = 16)
+    plt.plot(r_plot/mass, np.abs(h1), label = r'$|h_1|$')
+    plt.yscale('log')
+    plt.xscale('log')
+    plt.xlabel(r'$r/M$', fontsize = 16)
+    plt.ylabel(r'$h_1(r)$', fontsize = 16)
+    plt.legend()
+    plt.grid()
+
+    plt.tight_layout(rect = [0, 0, 1, 0.96])
+    plt.savefig(os.path.join(final_plot_omega_dir, '8panel_pipeline.png'), format='png')
+    plt.close()
+
+    plt.figure(figsize = [16, 9])
+    plt.subplot(2, 2, 1)
+    plt.suptitle(rf'Wavefunction Pipeline for $M \omega$ = {mass*omega_plot:.4f} (1/2)', fontsize = 18)
+    plt.title(r'PINN Output $P(x)$ & $Q(x)$', fontsize = 16)
+    plt.plot(x_plot, P_re, label='Re(P)')
+    plt.plot(x_plot, P_im, label='Im(P)')
+    plt.plot(x_plot, Q_re, label='Re(Q)')
+    plt.plot(x_plot, Q_im, label='Im(Q)')
+    plt.xlabel('x', fontsize = 16)
+    plt.ylabel('P and Q', fontsize = 16)
+    plt.legend()
+    plt.grid()
+
+    plt.subplot(2, 2, 2)
+    plt.title(r'PINN Output $P(r)$ & $Q(r)$', fontsize = 16)
+    plt.plot(r_plot/mass, P_re, label='Re(P)')
+    plt.plot(r_plot/mass, P_im, label='Im(P)')
+    plt.plot(r_plot/mass, Q_re, label='Re(Q)')
+    plt.plot(r_plot/mass, Q_im, label='Im(Q)')
+    plt.xscale('log')
+    plt.xlabel(r'$r/M$', fontsize = 16)
+    plt.ylabel(r'$P$ and $Q$', fontsize = 16)
+    plt.legend()
+    plt.grid()
+
+    plt.subplot(2, 2, 3)
+    plt.title(r'$u(x) = T_4 + E x^5 [P + e^{2 i \omega r_*} Q]$', fontsize = 16)
+    plt.plot(x_plot, u_re, label=r'$\Re(u_{NN})$')
+    plt.plot(x_plot, u_im, label=r'$\Im(u_{NN})$')
+    plt.xlabel(r'$x$', fontsize = 16)
+    plt.ylabel(r'$u(x)$', fontsize = 16)
+    plt.legend()
+    plt.grid()
+
+    plt.subplot(2, 2, 4)
+    plt.title(r'$u(r) = T_4 + E x^5 [P + e^{2 i \omega r_*} Q]$', fontsize = 16)
+    plt.plot(r_plot/mass, u_re, label=r'$\Re(u_{NN})$')
+    plt.plot(r_plot/mass, u_im, label=r'$\Im(u_{NN})$')
+    plt.xscale('log')
+    plt.xlabel(r'$r/M$', fontsize = 16)
+    plt.ylabel(r'$u(r)$', fontsize = 16)
+    plt.legend()
+    plt.grid()
+
+    plt.tight_layout(rect = [0, 0, 1, 0.95])
+    plt.savefig(os.path.join(final_plot_omega_dir, '4panel_pipelinePQu.png'), format='png')
+    plt.close()
+
+    plt.figure(figsize = [16, 9])
+    plt.suptitle(rf'Wavefunction Pipeline for $M \omega$ = {mass*omega_plot:.4f} (2/2)', fontsize = 18)
+    plt.subplot(2, 2, 1)
+    plt.title(r'$\Psi(x) = e^{- i \omega r_*}u(x)$', fontsize = 16)
+    plt.plot(x_plot, Psi.real, label=r'$\Re(\Psi_{NN})$')
+    plt.plot(x_plot, Psi.imag, label=r'$\Im(\Psi_{NN})$')
+    plt.xlabel(r'$x$', fontsize = 16)
+    plt.ylabel(r'$\Psi(x)$', fontsize = 16)
+    plt.legend()
+    plt.grid()
+
+    plt.subplot(2, 2, 2)
+    plt.title(r'$\Psi(r) = e^{- i \omega r_*}u(r)$', fontsize = 16)
+    plt.plot(r_plot/mass, Psi.real, label=r'$\Re(\Psi_{NN})$')
+    plt.plot(r_plot/mass, Psi.imag, label=r'$\Im(\Psi_{NN})$')
+    plt.xscale('log')
+    plt.xlabel(r'$r/M$', fontsize = 16)
+    plt.ylabel(r'$\Psi(r)$', fontsize = 16)
+    plt.legend()
+    plt.grid()
+
+    plt.subplot(2, 2, 3)
+    plt.title(r'$|h_1(x)| = |r(x) \Psi/f(r(x))|$', fontsize = 16)
+    plt.plot(x_plot, np.abs(h1), label=r'$|h_1|$')
+    plt.yscale('log')
+    plt.xlabel(r'$x$', fontsize = 16)
+    plt.ylabel(r'$|h_1(x)|$', fontsize = 16)
+    # plt.legend()
+    plt.grid()
+
+    plt.subplot(2, 2, 4)
+    plt.title(r'$|h_1(r)| = |r \Psi/f(r)|$', fontsize = 16)
+    plt.plot(r_plot/mass, np.abs(h1), label = r'$|h_1|$')
+    plt.xscale('log')
+    plt.yscale('log')
+    plt.xlabel(r'$r/M$', fontsize = 16)
+    plt.ylabel(r'$|h_1(r)|$', fontsize = 16)
+    # plt.legend()
+    plt.grid()
+
+    plt.tight_layout(rect = [0, 0, 1, 0.95])
+    plt.savefig(os.path.join(final_plot_omega_dir, '4panel_pipelinePsih.png'), format='png')
+    plt.close()
+
+
+    plt.figure(figsize = [16, 10])
+    plt.suptitle(rf'Amplitude and Phase of $h_1$, $M \omega =$ {mass*omega_plot:.4f}', fontsize = 18)
+    plt.subplot(2, 2, 1)
+    # plt.title(r'$|h_1(x)| = |r(x) \Psi/f(r(x))|$', fontsize = 16)
+    plt.yscale('log')
+    plt.plot(x_plot, np.abs(h1), label=r'$|h_1|$')
+    plt.xlabel(r'$x$', fontsize = 16)
+    plt.ylabel(r'$|h_1(x)|$', fontsize = 16)
+    # plt.legend()
+    plt.grid()
+
+    plt.subplot(2, 2, 2)
+    # plt.title(r'$|h_1(r)| = |r \Psi/f(r)|$', fontsize = 16)
+    plt.plot(r_plot/mass, np.abs(h1), label = r'$|h_1|$')
+    plt.yscale('log')
+    plt.xscale('log')
+    plt.xlabel(r'$r/M$', fontsize = 16)
+    plt.ylabel(r'$|h_1(r)|$', fontsize = 16)
+    # plt.legend()
+    plt.grid()
+
+    arg_h1 = np.unwrap(np.angle(h1))
+
+    plt.subplot(2, 2, 3)
+    # plt.title(r'$arg(h_1(x))$', fontsize = 16)
+    plt.plot(x_plot, arg_h1, label = r'$\arg(h_1(x))$')
+    plt.xlabel(r'$x$', fontsize = 16)
+    plt.ylabel(r'$\arg(h_1(x))$', fontsize = 16)
+    # plt.legend()
+    plt.grid()
+
+    plt.subplot(2, 2, 4)
+    # plt.title(r'$arg(h_1(r))$', fontsize = 16)
+    plt.plot(r_plot/mass, arg_h1, label = r'$\arg(h_1(r))$')
+    plt.xscale('log')
+    plt.xlabel(r'$r/M$', fontsize = 16)
+    plt.ylabel(r'$\arg(h_1(r))$', fontsize = 16)
+    # plt.legend()
+    plt.grid()
+    
+    plt.tight_layout(rect = [0, 0, 1, 0.95])
+    plt.savefig(os.path.join(final_plot_omega_dir, 'h1_amplitude_phase.png'), format='png')
+    plt.close()
+
+
+
+
 
 if args.no_numerical_csv:
     #External solver skipped: comparison arrays are filled with NaN so the later summaries and checkpoint still work
@@ -2224,10 +2491,10 @@ else:
     plt.figure(figsize=[7, 5])
 
     plt.plot(mass*query_comparison_omegas, query_numerical_gbfs, label='Numerical')
-    plt.plot(mass*query_comparison_omegas, query_pinn_gbfs, 'x-', label='Two-input PINN')
+    plt.plot(mass*query_comparison_omegas, query_pinn_gbfs, 'x-', label='PINN')
     plt.xlabel(r'$M \omega$', fontsize = 16)
     plt.ylabel(r'$\Gamma(M\omega)$', fontsize = 16)
-    plt.title(f'Grey-Body Factor, l = {mode}')
+    plt.title(rf'Grey-Body Factor, $\ell$ = {mode}')
     plt.grid()
     plt.legend()
     plt.tight_layout()
@@ -2264,7 +2531,7 @@ result_file_path = os.path.join(results_dir, 'result.txt')
 
 #Results text file
 with open(result_file_path, 'w') as f:
-    f.write("Two-input PINN\n")
+    f.write("PINN\n")
     f.write(f"mass = {mass}\n")
     f.write(f"l = {mode}\n")
     f.write(f"x_extract = {x_max}\n")
@@ -2376,7 +2643,7 @@ checkpoint["training_history"].update({
     "adam_gradient_clipped": [bool(v) for v in hist_clipped],
 })
 
-checkpoint_path = os.path.join(base_path, f'pinn_conditional_GBFWX_l{mode}.pth')
+checkpoint_path = os.path.join(network_dir, f'trained_PINNGBFWX_l{mode}.pth')
 atomic_torch_save(checkpoint, checkpoint_path)
 
 print(f"Checkpoint saved to {checkpoint_path}", flush = True)
@@ -2464,7 +2731,7 @@ plt.xscale('log')
 plt.yscale('log')
 plt.xlabel(r"$M \omega$", fontsize = 16)
 plt.ylabel(r"$\Gamma(M \omega)$", fontsize = 16)
-plt.title(f"GBF Comparison, M = {mass}, l = {mode}", fontsize = 16)
+plt.title(rf"GBF Comparison, $M$ = {mass}, $\ell$ = {mode}", fontsize = 16)
 plt.grid()
 plt.legend()
 plt.tight_layout()
