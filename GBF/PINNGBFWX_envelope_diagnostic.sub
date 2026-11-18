@@ -1,0 +1,66 @@
+# HTCondor submit file: envelope diagnostic for PINNGBFWX.py (needs gbf_reference.py and
+# run_PINNGBFWX_validation.sh in the same directory, and a logs/ directory).
+#
+# Two jobs that differ ONLY in the envelope crossover M*omega_b of the frequency gate:
+#   E_Mwb0.1   current setting
+#   E_Mwb0.3   gate moved up; an offline check with the exact solution showed the largest network output the
+#              envelope leaves to the PINN drops from ~250 (M*omega_b = 0.1, worst near M*omega ~ 0.15) to ~14
+# Both use the B_combined training options with the low-frequency loss off, the same seed and a shortened
+# schedule, so differences in the loss curves and the extraction report come from the envelope alone.
+
+executable = run_PINNGBFWX_validation.sh
+
+environment = "PINN_SCRIPT=PINNGBFWX.py"
+
+# -----------------------------
+# Shared run parameters
+# -----------------------------
+mass = 0.5
+mode = 2
+x_extract = 0.99
+omega_start = 1.2
+omega_final = 0.01
+query_steps = 100
+adam_steps = 12000
+lbfgs_steps = 500
+curriculum_start = 0.5
+curriculum_begin = 0.0
+curriculum_end = 0.3
+omega_sampling = log_uniform
+extra_input = omega_r
+lowfreq_weight = 0
+lowfreq_target = asymptotic
+lowfreq_max_M_omega = 0.04
+lowfreq_points = 64
+res_norm = env
+pi_ustar_scale = 56.0
+run_numerical = no
+extra_args =
+
+arguments = "--mass $(mass) --mode $(mode) --x_extract $(x_extract) --omega_start $(omega_start) --omega_final $(omega_final) --query_steps $(query_steps) --adam_steps $(adam_steps) --lbfgs_steps $(lbfgs_steps) --curriculum_start $(curriculum_start) --lowfreq_weight $(lowfreq_weight) --lowfreq_max_M_omega $(lowfreq_max_M_omega) --lowfreq_points $(lowfreq_points) --envelope_M_omega_b $(envelope_M_omega_b) --res_norm $(res_norm) --omega_sampling $(omega_sampling) --curriculum_begin $(curriculum_begin) --curriculum_end $(curriculum_end) --lowfreq_target $(lowfreq_target) --extra_input $(extra_input) --pi_ustar_scale $(pi_ustar_scale) --run_numerical $(run_numerical) --run_tag $(run_tag) $(extra_args)"
+
+getenv = True
+
+request_gpus = 1
+request_cpus = 1
+request_memory = 8GB
+
+should_transfer_files = NO
+
+output = logs/PINNGBFWX.$(run_tag).$(ClusterId).$(ProcId).out
+error  = logs/PINNGBFWX.$(run_tag).$(ClusterId).$(ProcId).err
+log    = logs/PINNGBFWX.$(ClusterId).log
+
+# -----------------------------
+# Job 1: current envelope crossover
+# -----------------------------
+run_tag = E_Mwb0.1
+envelope_M_omega_b = 0.1
+queue 1
+
+# -----------------------------
+# Job 2: crossover moved to M*omega_b = 0.3
+# -----------------------------
+run_tag = E_Mwb0.3
+envelope_M_omega_b = 0.3
+queue 1
