@@ -44,6 +44,7 @@ parser.add_argument('--curriculum_start', type = float, default = 0.5, help = 'F
 # parser.add_argument('--lowfreq_max_M_omega', type =  float, default = 0.1, help = 'Largest  M*omega for which the asymptotic GBF loss will be applied')
 # parser.add_argument('--lowfreq_points', type = int, default = 64, help = 'Number of fixed log-spaced frequencies for the low-frequency GBF loss')
 parser.add_argument('--envelope_M_omega_b', type = float, default = 0.3, help = 'Fixed dimensionless crossover M*omega_b for the static amplitude envelope (frequency gate); not currently trainable')
+parser.add_argument('--taylor_order', type = int, default = 4, choices = [0, 1, 2, 3, 4], help = "Number of horizon Taylor coefficients imposed exactly- network correction cariies x^{order + 1}. 0 imposes u(0) = 1 only")
 parser.add_argument('--res_norm', choices = ['env', 'self', 'none'], default = 'none', help = 'Choose ODE and flux residual loss term normalisation. Options are: none, self, env')
 parser.add_argument('--reextract_checkpoint', type = str, default = None, help = 'Path to a saved .pth checkpoint: skip training, load the model and run the extraction report only')
 parser.add_argument('--omega_sampling', choices = ['linear_beta', 'log_uniform'], default = 'linear_beta', help = 'Training and RAR-candidate frequency distribution: linear_beta (60%% uniform + 40%% Beta(0.6, 2)) or log_uniform')
@@ -63,6 +64,8 @@ args = parser.parse_args()
 mass = args.mass
 mode = args.mode
 x_max = args.x_extract
+taylor_order = args.taylor_order
+ansatz_x_power = taylor_order + 1
 
 if args.omega_start <= args.omega_final:
     raise ValueError("omega_final must be strictly less than omega_start")
@@ -262,7 +265,7 @@ def amplitude_envelope(x, mass, mode, omega, return_components = False):
     #with F = [(1 + epsilon**2)/(1 + (epsilon/y)**2)]**((l+1)/2), epsilon = 2Momega/c_l
     #and g is the frequency gate, g = 1/[1 + (M*omega/(M*omega_b))**(2*(l+1))]
     #Envelope E(x, omega) constructed so that it smoothes the near and far zone static solutions together- derived by asymptotic matching of these two regions.
-    #E(0, omega) = 1 and E(x, omega) multiplies only the x^5 neural correction so the prescribed horizon Taylor coefficients remain unchanged.
+    #E(0, omega) = 1 and E(x, omega) multiplies only the x^(ansatz_x_power + 1) neural correction so the prescribed horizon Taylor coefficients remain unchanged.
     omega_tensor = prepare_omega_tensor(omega, x)
 
     y = (1.0 - x).clamp(min = 1e-12)
@@ -288,7 +291,7 @@ def amplitude_envelope(x, mass, mode, omega, return_components = False):
     envelope = t.exp(gate*t.log(raw_envelope.clamp_min(t.finfo(x.dtype).tiny)))
 
     if return_components:
-        return envelope, {"u_static": u_static, "far_factor": far_factor, "gate": gate, "raw_envelope": raw_envelope, "correction_prefactor": x**5*envelope}
+        return envelope, {"u_static": u_static, "far_factor": far_factor, "gate": gate, "raw_envelope": raw_envelope, "correction_prefactor": x**ansatz_x_power*envelope}
 
     return envelope
 
@@ -317,7 +320,7 @@ def numpy_envelope_components(x_values, omega_value, mass, mode):
         if np.any(values <= 0):
             raise FloatingPointError(f"{name} is non-positive for mode={mode}, omega={omega_value}")
 
-    return {"u_static": u_static, "far_factor": far_factor, "gate": np.full_like(x_values, gate_value), "raw_envelope": raw_envelope, "envelope": envelope, "correction_prefactor": x_values**5*envelope}
+    return {"u_static": u_static, "far_factor": far_factor, "gate": np.full_like(x_values, gate_value), "raw_envelope": raw_envelope, "envelope": envelope, "correction_prefactor": x_values**(ansatz_x_power)*envelope}
 
 def plot_amplitude_envelope_diagnostics(mass, mode, x_max, omega_min, omega_max):
     #Save envelope profiles, components, a frequency heatmap and gate diagnostics
@@ -332,7 +335,7 @@ def plot_amplitude_envelope_diagnostics(mass, mode, x_max, omega_min, omega_max)
         axes[0].semilogy(x_values, comp["envelope"], label = label)
         axes[1].semilogy(x_values, np.maximum(comp["correction_prefactor"], 1e-30), label = label)
     axes[0].set(xlabel = r"$x$", ylabel = r"$E(x, \omega)$", title = "Static Amplitude Envelope")
-    axes[1].set(xlabel = r"$x$", ylabel = r"$x^5 E(x, \omega)$", title = "Effective NN-output pre-factor")
+    axes[1].set(xlabel = r"$x$", ylabel = rf"$x^{{ansatz_x_power}} E(x, \omega)$", title = "Effective NN-output pre-factor")
     for ax in axes:
         ax.grid(True, which = "both")
         ax.legend()
@@ -369,7 +372,7 @@ def plot_amplitude_envelope_diagnostics(mass, mode, x_max, omega_min, omega_max)
     axes[0].set(xlabel=r"$M\omega$", ylabel=r"$g(\omega)$", ylim=(-0.03, 1.03), title="Fixed frequency gate")
     axes[0].legend()
     axes[1].loglog(Momega_line, envelope_extract, label = r"$E(x_{\max},\omega)$")
-    axes[1].loglog(Momega_line, np.maximum(prefactor_extract, 1e-300), label = r"$x_{\max}^5 E(x_{\max},\omega)$")
+    axes[1].loglog(Momega_line, np.maximum(prefactor_extract, 1e-300), label = rf"$x_{{\max}}^{{{ansatz_x_power}}} E(x_{{\max}},\omega)$")
     axes[1].set(xlabel = r"$M\omega$", ylabel = "Envelope/prefactor", title = r"Envelope at $x_{max}$")
     axes[1].legend()
     for ax in axes:
@@ -696,7 +699,7 @@ def ansatz(model, x_tensor, mass, mode, omega):
 
     omega_tensor = prepare_omega_tensor(omega, x_tensor)
 
-    c1_re, c1_im, c2_re, c2_im, c3_re, c3_im, c4_re, c4_im = taylor_coeffs(mass, mode, omega_tensor)
+    c = taylor_coeffs(mass, mode, omega_tensor) #(c1_re, c1_im, c2_re, c2_im, c3_re, c3_im, c4_re, c4_im)
 
     omega_scaled = scale_omega(omega_tensor)
 
@@ -712,9 +715,18 @@ def ansatz(model, x_tensor, mass, mode, omega):
     #Envelope
     env = amplitude_envelope(x_tensor, mass, mode, omega_tensor)
 
+    #Horizon polynomial
+    poly_re = t.ones_like(x_tensor)
+    poly_im = t.zeros_like(x_tensor)
+    for n in range(taylor_order):
+        poly_re = poly_re + c[2*n]*x_tensor**(n + 1)
+        poly_im = poly_im + c[2*n + 1]*x_tensor**(n + 1)
+
+    prefactor = x_tensor**ansatz_x_power*env
+
     #Ansatz gives event horizon behaviour anchor and also passes the exact analytic problematic oscillation exp(2i*omega*r_*)
-    u_re = 1 + c1_re*x_tensor + c2_re*x_tensor**2 + c3_re*x_tensor**3 + c4_re*x_tensor**4 + x_tensor**5*env*(P_re + Q_re*cs - Q_im*sn)
-    u_im = c1_im*x_tensor + c2_im*x_tensor**2 + c3_im*x_tensor**3 + c4_im*x_tensor**4 + x_tensor**5*env*(P_im + Q_im*cs + Q_re*sn)
+    u_re = poly_re + prefactor*(P_re + Q_re*cs - Q_im*sn)
+    u_im = poly_im + prefactor*(P_im + Q_re*sn + Q_im*cs)
     return u_re, u_im, P_re, P_im, Q_re, Q_im
 
 #Coefficient of low-frequency limit of GBF (in Finnian Gray paper \Gamma \approx C_{l,s} (M\omega)^{2l+2}) with C_{l,2} given by function below
@@ -1673,6 +1685,9 @@ for r in extraction_check_rows:
 if args.reextract_checkpoint is not None:
     checkpoint_in = t.load(args.reextract_checkpoint, map_location = device, weights_only = False) #own checkpoint file
     saved_args = checkpoint_in.get("config", {}).get("arguments", {})
+    #Checkpoints from before --taylor_order existed used the T_4 + x^5 ansatz
+    if int(saved_args.get("taylor_order", 4)) != args.taylor_order:
+        raise ValueError(f"--taylor_order = {args.taylor_order} does not match the checkpoint value {saved_args.get('taylor_order', 4)}")
     if not saved_args:
         print("WARNING: checkpoint has no saved arguments; cannot verify that the command-line settings match it.", flush = True)
     for key in ("mass", "mode", "x_extract", "omega_start", "omega_final", "envelope_M_omega_b"):
@@ -1747,7 +1762,7 @@ run_config = {
 
     "reproducibility": {"torch_seed": args.seed, "dtype": str(DTYPE), "device": str(device)},
 
-    "model": {"in_channels": N_INPUTS, "extra_input": args.extra_input, "out_channels": 4, "hidden_channels": 64, "hidden_layers": 3, "activation": "keerie_adaptive_tanh", "activation_n": 10.0, "ansatz_x_power": 5},
+    "model": {"in_channels": N_INPUTS, "extra_input": args.extra_input, "out_channels": 4, "hidden_channels": 64, "hidden_layers": 3, "activation": "keerie_adaptive_tanh", "activation_n": 10.0, "ansatz_x_power": ansatz_x_power},
 
     "ansatz_envelope": {"enabled": True, "type": "gated_static_solution_times_far_zone_taper", "Momega_b_fixed": ENVELOPE_M_OMEGA_B, "gate_exponent": int(2 * (mode + 1)),
         "characteristic_radius_scale_C_l": characteristic_radius_scale(mode),
@@ -2576,7 +2591,7 @@ checkpoint = {'model_state_dict': model.state_dict(),
             'omega_input_scaling': {'omega_min': omega_min, 'omega_max': omega_max},
             'rar_config': {'interval': RAR_INTERVAL, 'candidates': RAR_CANDIDATES, 'add_per_refinement': RAR_ADD, 'max_points': RAR_MAX, 'min_joint_distance': RAR_MIN_JOINT_DISTANCE,
                         "restart_after": RAR_RESTART_AFTER},
-            'ansatz_config': {'nn_output_scale': 1.0, 'x_power': 5, 'x_safe_min': 1e-12, 'x_safe_max': 1 - 1e-3},
+            'ansatz_config': {'nn_output_scale': 1.0, 'x_power': ansatz_x_power, 'taylor_order': taylor_order, 'x_safe_min': 1e-12, 'x_safe_max': 1 - 1e-3},
             'mass': mass,
             'mode': mode,
             'x_max': x_max,
