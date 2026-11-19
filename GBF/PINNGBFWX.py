@@ -1285,6 +1285,7 @@ def save_training_diagnostics(model, epoch_number, omega):
     plt.plot(hist_epochs, hist_flux, label = 'Flux')
     plt.plot(hist_epochs, hist_ode_re, label = 'Real ODE')
     plt.plot(hist_epochs, hist_ode_im, label = 'Imag ODE')
+    plt.axvline(adam_iterations, color = 'k', linestyle = '--', linewidth = 1, alpha = 0.8, label = 'Adam -> L-BFGS')
     plt.yscale('log')
     plt.xlabel('Epoch', fontsize = 16)
     plt.ylabel('Loss', fontsize = 16)
