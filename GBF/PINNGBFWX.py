@@ -44,6 +44,7 @@ parser.add_argument('--curriculum_start', type = float, default = 0.5, help = 'F
 # parser.add_argument('--lowfreq_max_M_omega', type =  float, default = 0.1, help = 'Largest  M*omega for which the asymptotic GBF loss will be applied')
 # parser.add_argument('--lowfreq_points', type = int, default = 64, help = 'Number of fixed log-spaced frequencies for the low-frequency GBF loss')
 parser.add_argument('--envelope_M_omega_b', type = float, default = 1e6, help = 'Fixed dimensionless crossover M*omega_b for the static amplitude envelope (frequency gate); not currently trainable')
+parser.add_argument('--envelope_gate_fraction', type = float, default = None, help = 'If set, M*omega_b = fraction*(l + 1/2)/(3*sqrt(3)), a fraction of the eikonal limit of the RW potential peak frequency')
 parser.add_argument('--taylor_order', type = int, default = 4, choices = [0, 1, 2, 3, 4], help = "Number of horizon Taylor coefficients imposed exactly- network correction carries x^{order + 1}. 0 imposes u(0) = 1 only")
 parser.add_argument('--res_norm', choices = ['env', 'self', 'none'], default = 'none', help = 'Choose ODE and flux residual loss term normalisation. Options are: none, self, env')
 parser.add_argument('--reextract_checkpoint', type = str, default = None, help = 'Path to a saved .pth checkpoint: skip training, load the model and run the extraction report only')
@@ -255,7 +256,14 @@ def static_solution_coeffs(mode):
 
     return {k: float(v/norm) for k, v in coeffs.items()}
 
-ENVELOPE_M_OMEGA_B = float(args.envelope_M_omega_b)
+EIKONAL_M_OMEGA = (mode + 0.5)/(3.0*np.sqrt(3.0))
+if args.envelope_gate_fraction is not None:
+    if args.envelope_gate_fraction <= 0:
+        raise ValueError("envelope_gate_fraction must be positive")
+    ENVELOPE_M_OMEGA_B = args.envelope_gate_fraction*EIKONAL_M_OMEGA
+else:
+    ENVELOPE_M_OMEGA_B = float(args.envelope_M_omega_b)
+print(f"Envelope gate: M*omega_b = {ENVELOPE_M_OMEGA_B:.4g} (eikonal barrier top M*omega = {EIKONAL_M_OMEGA:4g})", flush = True)
 
 def characteristic_radius_scale(mode):
     #c_l = ((2l + 1)!!)**(1/(l+1)), used in the characteristic radius: epsilon = 2Momega/c_l
@@ -1695,6 +1703,8 @@ if args.reextract_checkpoint is not None:
     for key in ("mass", "mode", "x_extract", "omega_start", "omega_final", "envelope_M_omega_b"):
         if key in saved_args and not np.isclose(float(saved_args[key]), float(getattr(args, key)), rtol = 0.0, atol = 1e-12):
             raise ValueError(f"--{key} = {getattr(args, key)} does not match the checkpoint value {saved_args[key]}")
+    if saved_args.get("envelope_gate_fraction") != args.envelope_gate_fraction:
+        raise ValueError(f"--envelope_gate_fraction = {args.envelope_gate_fraction} does not match the checkpoint value {saved_args.get('envelope_gate_fraction')}")
     #Previous checkpoints have no 'extra_input' and are 2-input models
     if saved_args.get("extra_input", "none") != args.extra_input:
         raise ValueError(f"--extra_input = {args.extra_input} does not match the checkpoint value {saved_args.get('extra_input', 'none')}")
