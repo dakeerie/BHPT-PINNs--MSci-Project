@@ -1641,8 +1641,8 @@ t.manual_seed(args.seed)
 if t.cuda.is_available():
     t.cuda.manual_seed_all(args.seed)
 
-#2,3 -> 4 PINN with 3 hidden layers each 64 neurons wide i.e. 2,3 -> 64 -> 64 -> 64 -> 4
-model = Model(N_INPUTS, 4, 64, num_hidden_layers = 3).to(device = device, dtype = DTYPE)
+#2,3 -> 4 PINN with 3 hidden layers each 64 neurons wide i.e. 2,3 -> 128 -> 128 -> 128 -> 4
+model = Model(N_INPUTS, 4, 128, num_hidden_layers = 3).to(device = device, dtype = DTYPE)
 
 #Make various directories for saving results
 run_id = datetime.now().strftime("%Y%m%d_%H%M%S")
