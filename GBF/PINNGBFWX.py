@@ -43,8 +43,8 @@ parser.add_argument('--curriculum_start', type = float, default = 0.5, help = 'F
 # parser.add_argument('--lowfreq_weight', type = float, default = 1e-3, help = 'Weight of the asymptotic low-frequency GBF loss. Set to 0 to disable')
 # parser.add_argument('--lowfreq_max_M_omega', type =  float, default = 0.1, help = 'Largest  M*omega for which the asymptotic GBF loss will be applied')
 # parser.add_argument('--lowfreq_points', type = int, default = 64, help = 'Number of fixed log-spaced frequencies for the low-frequency GBF loss')
-parser.add_argument('--envelope_M_omega_b', type = float, default = 0.3, help = 'Fixed dimensionless crossover M*omega_b for the static amplitude envelope (frequency gate); not currently trainable')
-parser.add_argument('--taylor_order', type = int, default = 4, choices = [0, 1, 2, 3, 4], help = "Number of horizon Taylor coefficients imposed exactly- network correction cariies x^{order + 1}. 0 imposes u(0) = 1 only")
+parser.add_argument('--envelope_M_omega_b', type = float, default = 1e6, help = 'Fixed dimensionless crossover M*omega_b for the static amplitude envelope (frequency gate); not currently trainable')
+parser.add_argument('--taylor_order', type = int, default = 4, choices = [0, 1, 2, 3, 4], help = "Number of horizon Taylor coefficients imposed exactly- network correction carries x^{order + 1}. 0 imposes u(0) = 1 only")
 parser.add_argument('--res_norm', choices = ['env', 'self', 'none'], default = 'none', help = 'Choose ODE and flux residual loss term normalisation. Options are: none, self, env')
 parser.add_argument('--reextract_checkpoint', type = str, default = None, help = 'Path to a saved .pth checkpoint: skip training, load the model and run the extraction report only')
 parser.add_argument('--omega_sampling', choices = ['linear_beta', 'log_uniform'], default = 'linear_beta', help = 'Training and RAR-candidate frequency distribution: linear_beta (60%% uniform + 40%% Beta(0.6, 2)) or log_uniform')
@@ -66,6 +66,8 @@ mode = args.mode
 x_max = args.x_extract
 taylor_order = args.taylor_order
 ansatz_x_power = taylor_order + 1
+
+ansatz_label = (r"$u = 1 + x E(x, \omega)[P+e^{2 i \omega r_*}Q]$") if taylor_order == 0 else rf"$u = T_{taylor_order}(x) + x^{{{ansatz_x_power}}} E(x, \omega)[P + e^{{2 i \omega r_*}}Q]$"
 
 if args.omega_start <= args.omega_final:
     raise ValueError("omega_final must be strictly less than omega_start")
@@ -265,7 +267,7 @@ def amplitude_envelope(x, mass, mode, omega, return_components = False):
     #with F = [(1 + epsilon**2)/(1 + (epsilon/y)**2)]**((l+1)/2), epsilon = 2Momega/c_l
     #and g is the frequency gate, g = 1/[1 + (M*omega/(M*omega_b))**(2*(l+1))]
     #Envelope E(x, omega) constructed so that it smoothes the near and far zone static solutions together- derived by asymptotic matching of these two regions.
-    #E(0, omega) = 1 and E(x, omega) multiplies only the x^(ansatz_x_power + 1) neural correction so the prescribed horizon Taylor coefficients remain unchanged.
+    #E(0, omega) = 1 and E(x, omega) multiplies only the x^(ansatz_x_power) neural correction so the prescribed horizon Taylor coefficients remain unchanged.
     omega_tensor = prepare_omega_tensor(omega, x)
 
     y = (1.0 - x).clamp(min = 1e-12)
@@ -335,7 +337,7 @@ def plot_amplitude_envelope_diagnostics(mass, mode, x_max, omega_min, omega_max)
         axes[0].semilogy(x_values, comp["envelope"], label = label)
         axes[1].semilogy(x_values, np.maximum(comp["correction_prefactor"], 1e-30), label = label)
     axes[0].set(xlabel = r"$x$", ylabel = r"$E(x, \omega)$", title = "Static Amplitude Envelope")
-    axes[1].set(xlabel = r"$x$", ylabel = rf"$x^{{ansatz_x_power}} E(x, \omega)$", title = "Effective NN-output pre-factor")
+    axes[1].set(xlabel = r"$x$", ylabel = rf"$x^{{{ansatz_x_power}}} E(x, \omega)$", title = "Effective NN-output pre-factor")
     for ax in axes:
         ax.grid(True, which = "both")
         ax.legend()
@@ -368,8 +370,9 @@ def plot_amplitude_envelope_diagnostics(mass, mode, x_max, omega_min, omega_max)
 
     fig, axes = plt.subplots(1, 2, figsize=(12, 4.5))
     axes[0].semilogx(Momega_line, gate_line)
-    axes[0].axvline(ENVELOPE_M_OMEGA_B, linestyle="--", alpha=0.7, label=r"$M\omega_b$")
-    axes[0].set(xlabel=r"$M\omega$", ylabel=r"$g(\omega)$", ylim=(-0.03, 1.03), title="Fixed frequency gate")
+    if ENVELOPE_M_OMEGA_B <= mass*omega_max:
+        axes[0].axvline(ENVELOPE_M_OMEGA_B, linestyle="--", alpha=0.7, label=r"$M\omega_b$")
+    axes[0].set(xlabel=r"$M\omega$", ylabel=r"$g(\omega)$", ylim=(-0.03, 1.03), title = "Fixed frequency gate")
     axes[0].legend()
     axes[1].loglog(Momega_line, envelope_extract, label = r"$E(x_{\max},\omega)$")
     axes[1].loglog(Momega_line, np.maximum(prefactor_extract, 1e-300), label = rf"$x_{{\max}}^{{{ansatz_x_power}}} E(x_{{\max}},\omega)$")
@@ -391,7 +394,7 @@ def plot_amplitude_envelope_diagnostics(mass, mode, x_max, omega_min, omega_max)
 
     with open(os.path.join(envelope_dir, "amplitude_envelope_sample.csv"), "w", newline="") as f:
         writer = csv.writer(f)
-        writer.writerow(["x", "omega", "Momega", "u_static", "far_factor", "gate", "envelope", "x5_envelope"])
+        writer.writerow(["x", "omega", "Momega", "u_static", "far_factor", "gate", "envelope", f"x{ansatz_x_power}_envelope"])
         for om in omega_values:
             comp = numpy_envelope_components(x_values, om, mass, mode)
             for j, xv in enumerate(x_values):
@@ -692,8 +695,9 @@ def extra_input_features(x_tensor, mass, omega_tensor):
     return [2.0*t.log(y)/math.log(1.0 - x_max) - 1.0]
 
 #Ansatz for the wave-function u
-#Ansatz is of the form u(x) = 1 + c1*x + c2*x**2 + c3*x**3 + c4*x*4 + x**5*E(x, omega)*(P + exp(2i*omega*r_star)*Q)
+#Ansatz is of the form u(x) = 1 + sum_{n=1}^K c_n x^n + x^{K + 1}*E(x, omega)*(P + exp(2i*omega*r_star)*Q) for K = --taylor_order
 #where P and Q are complex with components corresponding to the four channel neural network output
+#K = 0 imposes u(0) = 1 only
 #Envelope E scales only the neural network correction and is fixed (not trainable). Envelope is introduced to help PINN with low frequency amplitude blow up at large x
 def ansatz(model, x_tensor, mass, mode, omega):
 
@@ -1499,7 +1503,7 @@ def save_simulation_comparison_plots(omegas, pinn_gbfs, numerical_gbfs, absolute
     plt.subplot(1, 2, 1)
     plt.suptitle('Simulation vs. PINN')
     plt.plot(mass*omegas, numerical_gbfs, label='Simulation')
-    plt.plot(mass*omegas, pinn_gbfs, label='Conditional PINN')
+    plt.plot(mass*omegas, pinn_gbfs, label='PINN')
     plt.xlabel(r'$M \omega$', fontsize=16)
     plt.ylabel(r'$\Gamma(M \omega)$', fontsize=16)
     plt.title(f'GBF Comparison - {title_suffix}')
@@ -1508,7 +1512,7 @@ def save_simulation_comparison_plots(omegas, pinn_gbfs, numerical_gbfs, absolute
 
     plt.subplot(1, 2, 2)
     plt.plot(mass*omegas, numerical_gbfs, label='Simulation')
-    plt.plot(mass*omegas, pinn_gbfs, label='Conditional PINN')
+    plt.plot(mass*omegas, pinn_gbfs, label='PINN')
     plt.xlabel(r'$M \omega$', fontsize=16)
     plt.ylabel(r'$\Gamma(M \omega)$', fontsize=16)
     plt.yscale('log')
@@ -1688,14 +1692,14 @@ if args.reextract_checkpoint is not None:
     #Checkpoints from before --taylor_order existed used the T_4 + x^5 ansatz
     if int(saved_args.get("taylor_order", 4)) != args.taylor_order:
         raise ValueError(f"--taylor_order = {args.taylor_order} does not match the checkpoint value {saved_args.get('taylor_order', 4)}")
-    if not saved_args:
-        print("WARNING: checkpoint has no saved arguments; cannot verify that the command-line settings match it.", flush = True)
     for key in ("mass", "mode", "x_extract", "omega_start", "omega_final", "envelope_M_omega_b"):
         if key in saved_args and not np.isclose(float(saved_args[key]), float(getattr(args, key)), rtol = 0.0, atol = 1e-12):
             raise ValueError(f"--{key} = {getattr(args, key)} does not match the checkpoint value {saved_args[key]}")
     #Previous checkpoints have no 'extra_input' and are 2-input models
     if saved_args.get("extra_input", "none") != args.extra_input:
         raise ValueError(f"--extra_input = {args.extra_input} does not match the checkpoint value {saved_args.get('extra_input', 'none')}")
+    if not saved_args:
+        print("WARNING: checkpoint has no saved arguments; cannot verify that the command-line settings match it.", flush = True)
     model.load_state_dict(checkpoint_in["model_state_dict"])
     print(f"Loaded model from {args.reextract_checkpoint}; running extraction report only.", flush = True)
     extraction_report(model, comparisons_dir)
@@ -2113,7 +2117,7 @@ final_model_checkpoint = {
 atomic_torch_save(final_model_checkpoint, checkpoint_path)
 print(f"Saved trained model checkpoint to {checkpoint_path}", flush=True)
 
-print("Conditional PINN training complete.", flush = True)
+print("PINN training complete.", flush = True)
 
 #Post-training query over omega range 
 omega_query = np.logspace(np.log10(omega_min), np.log10(omega_max), args.query_steps)
@@ -2140,6 +2144,7 @@ a1.semilogx(Mw_q, 20*np.log10(np.abs(T_q)))
 a2.semilogx(Mw_q, np.degrees(np.unwrap(np.angle(T_q))))
 a1.semilogx(Mw_q[m], 10*np.log10(low_frequency_GBF_coeff(mode)) + 20*(mode + 1)*np.log10(Mw_q[m]), '--', label = rf'$\sqrt{{C_\ell}}(M\omega)^{{\ell + 1}}$: {20*(mode + 1)} dB/decade')
 a1.set_ylabel(r'$20 \log_{10} |T|$ (dB)')
+a1.legend(fontsize = 8)
 a2.set_ylabel(r'$\arg(T)$ (deg)')
 a2.set_xlabel(r'$M \omega$')
 for a in (a1, a2):
@@ -2225,8 +2230,7 @@ for omega_plot in diagnostic_omegas:
     plt.figure(figsize=[14, 6])
 
     plt.subplot(1, 2, 1)
-    plt.suptitle("Wave function u built via ansatz of P and Q\n"
-        r"$u = T_4(x) + x^5 E(x, \omega)[P + e^{2 i \omega r_*}Q]$" + rf" for $\ell$ = {mode}, omega = {omega_plot:.4f}")
+    plt.suptitle("Wave function u built via ansatz of P and Q\n" + ansatz_label + rf" for $\ell$ = {mode}, omega = {omega_plot:.4f}")
     plt.plot(x_plot, u_re, label=r'$\Re(u_{NN})$')
     plt.plot(x_plot, u_im, label=r'$\Im(u_{NN})$')
     plt.xlabel('x', fontsize = 16)
@@ -2276,7 +2280,7 @@ for omega_plot in diagnostic_omegas:
     plt.grid()
 
     plt.subplot(4, 2, 3)
-    plt.title(r'$u(x) = T_4 + E x^5 [P + e^{2 i \omega r_*} Q]$', fontsize = 16)
+    plt.title(ansatz_label, fontsize = 16)
     plt.plot(x_plot, u_re, label=r'$\Re(u_{NN})$')
     plt.plot(x_plot, u_im, label=r'$\Im(u_{NN})$')
     plt.xlabel(r'$x$', fontsize = 16)
@@ -2285,7 +2289,7 @@ for omega_plot in diagnostic_omegas:
     plt.grid()
 
     plt.subplot(4, 2, 4)
-    plt.title(r'$u(r) = T_4 + E x^5 [P + e^{2 i \omega r_*} Q]$', fontsize = 16)
+    plt.title(ansatz_label, fontsize = 16)
     plt.plot(r_plot/mass, u_re, label=r'$\Re(u_{NN})$')
     plt.plot(r_plot/mass, u_im, label=r'$\Im(u_{NN})$')
     plt.xscale('log')
@@ -2364,7 +2368,7 @@ for omega_plot in diagnostic_omegas:
     plt.grid()
 
     plt.subplot(2, 2, 3)
-    plt.title(r'$u(x) = T_4 + E x^5 [P + e^{2 i \omega r_*} Q]$', fontsize = 16)
+    plt.title(ansatz_label, fontsize = 16)
     plt.plot(x_plot, u_re, label=r'$\Re(u_{NN})$')
     plt.plot(x_plot, u_im, label=r'$\Im(u_{NN})$')
     plt.xlabel(r'$x$', fontsize = 16)
@@ -2373,7 +2377,7 @@ for omega_plot in diagnostic_omegas:
     plt.grid()
 
     plt.subplot(2, 2, 4)
-    plt.title(r'$u(r) = T_4 + E x^5 [P + e^{2 i \omega r_*} Q]$', fontsize = 16)
+    plt.title(ansatz_label, fontsize = 16)
     plt.plot(r_plot/mass, u_re, label=r'$\Re(u_{NN})$')
     plt.plot(r_plot/mass, u_im, label=r'$\Im(u_{NN})$')
     plt.xscale('log')
@@ -2688,7 +2692,7 @@ plt.figure(figsize = [14, 6])
 plt.subplot(1, 2, 1)
 plt.suptitle('Product Integral vs. PINN')
 plt.plot(mass*query_comparison_omegas, PI_T, label = 'Product Integral')
-plt.plot(mass*query_comparison_omegas, query_pinn_gbfs, label = 'Conditional PINN')
+plt.plot(mass*query_comparison_omegas, query_pinn_gbfs, label = 'PINN')
 plt.xlabel(r'$M \omega$', fontsize = 16)
 plt.ylabel(r'$\Gamma(M\omega)$', fontsize = 16)
 plt.title(r'GBF Comparison - Dense Query Frequencies', fontsize = 16)
@@ -2697,7 +2701,7 @@ plt.legend()
 
 plt.subplot(1, 2, 2)
 plt.plot(mass*query_comparison_omegas, PI_T_list, label = 'Product Integral')
-plt.plot(mass*query_comparison_omegas, query_pinn_gbfs, label = 'Conditional PINN')
+plt.plot(mass*query_comparison_omegas, query_pinn_gbfs, label = 'PINN')
 plt.yscale('log')
 plt.xlabel(r'$M \omega$', fontsize = 16)
 plt.ylabel(r'$\Gamma(M\omega)$', fontsize = 16)
@@ -2740,7 +2744,7 @@ lowfreq_mask = Momega_common <= 0.1     #show the C_l (M omega)^(2l + 2) asympto
 
 plt.figure(figsize = (7, 6))
 plt.plot(mass*omega_common, query_numerical_gbfs, label = 'Simulation')
-plt.plot(mass*omega_common, query_pinn_gbfs, label = 'Conditional PINN')
+plt.plot(mass*omega_common, query_pinn_gbfs, label = 'PINN')
 plt.plot(mass*omega_common, PI_T, label = 'Product Integral')
 plt.plot(mass*omega_common[lowfreq_mask], asymptotic_gbf[lowfreq_mask], "--", label = "Low-frequency limit")
 plt.xscale('log')
