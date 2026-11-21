@@ -45,6 +45,7 @@ parser.add_argument('--curriculum_start', type = float, default = 0.5, help = 'F
 # parser.add_argument('--lowfreq_points', type = int, default = 64, help = 'Number of fixed log-spaced frequencies for the low-frequency GBF loss')
 parser.add_argument('--envelope_M_omega_b', type = float, default = 1e6, help = 'Fixed dimensionless crossover M*omega_b for the static amplitude envelope (frequency gate); not currently trainable')
 parser.add_argument('--envelope_gate_fraction', type = float, default = None, help = 'If set, M*omega_b = fraction*(l + 1/2)/(3*sqrt(3)), a fraction of the eikonal limit of the RW potential peak frequency')
+parser.add_argument('--envelope_gate_exponent', type = float, default = None, help = 'Gate exponent p in g = 1/(1 + (M*omega/(M*omega_b))^p). Default is 2(l + 1) but this produces a very steep cut-off as l increases -> step function.')
 parser.add_argument('--taylor_order', type = int, default = 4, choices = [0, 1, 2, 3, 4], help = "Number of horizon Taylor coefficients imposed exactly- network correction carries x^{order + 1}. 0 imposes u(0) = 1 only")
 parser.add_argument('--res_norm', choices = ['env', 'self', 'none'], default = 'none', help = 'Choose ODE and flux residual loss term normalisation. Options are: none, self, env')
 parser.add_argument('--reextract_checkpoint', type = str, default = None, help = 'Path to a saved .pth checkpoint: skip training, load the model and run the extraction report only')
@@ -265,6 +266,10 @@ else:
     ENVELOPE_M_OMEGA_B = float(args.envelope_M_omega_b)
 print(f"Envelope gate: M*omega_b = {ENVELOPE_M_OMEGA_B:.4g} (eikonal barrier top M*omega = {EIKONAL_M_OMEGA:4g})", flush = True)
 
+GATE_P = float(args.envelope_gate_exponent) if args.envelope_gate_exponent is not None else 2.0*(mode + 1)
+if GATE_P <= 0:
+    raise ValueError("envelope_gate_exponent must be positive")
+
 def characteristic_radius_scale(mode):
     #c_l = ((2l + 1)!!)**(1/(l+1)), used in the characteristic radius: epsilon = 2Momega/c_l
     l = int(mode)
@@ -293,7 +298,7 @@ def amplitude_envelope(x, mass, mode, omega, return_components = False):
 
     M_omega = mass*omega_tensor
     z = (M_omega/ENVELOPE_M_OMEGA_B).clamp_min(t.finfo(x.dtype).tiny)
-    gate = t.sigmoid(-2.0*(mode + 1)*t.log(z))
+    gate = t.sigmoid(-GATE_P*t.log(z))
     # gate = 1.0/(1.0 + (M_omega/ENVELOPE_M_OMEGA_B)**(2*(mode + 1)))
     raw_envelope = u_static*far_factor
     
@@ -316,7 +321,7 @@ def numpy_envelope_components(x_values, omega_value, mass, mode):
     c_l = characteristic_radius_scale(mode)
     epsilon = 2*mass*float(omega_value)/c_l
     far_factor = ((1.0 + epsilon**2)/(1.0 + (epsilon/y)**2))**(0.5*(mode + 1))
-    gate_value = 1.0/(1.0 + (mass*float(omega_value)/ENVELOPE_M_OMEGA_B)**(2*(mode + 1)))
+    gate_value = 1.0/(1.0 + (mass*float(omega_value)/ENVELOPE_M_OMEGA_B)**GATE_P)
     raw_envelope = u_static*far_factor
     envelope = np.exp(gate_value*np.log(np.maximum(raw_envelope, np.finfo(float).tiny)))
 
@@ -369,7 +374,7 @@ def plot_amplitude_envelope_diagnostics(mass, mode, x_max, omega_min, omega_max)
     plt.close(fig)
 
     Momega_line = np.logspace(np.log10(mass*omega_min), np.log10(mass*omega_max), 300)
-    gate_line = 1.0/(1.0 + (Momega_line/ENVELOPE_M_OMEGA_B)**(2*(mode + 1)))
+    gate_line = 1.0/(1.0 + (Momega_line/ENVELOPE_M_OMEGA_B)**GATE_P)
     envelope_extract, prefactor_extract = [], []
     for Mw in Momega_line:
         comp = numpy_envelope_components(np.array([x_max]), Mw/mass, mass, mode)
@@ -1295,7 +1300,7 @@ def evaluate_fixed_frequency(model, mass, mode, omega, x_values):
         x_tensor = x_values
         x_tensor.requires_grad_(True)
 
-    u_re, u_im, J, total_loss, loss_flux, loss_ode, loss_ode_re, loss_ode_im, res_ode_re, res_ode_im, P_re, P_im, Q_re, Q_im = compute_loss(model, x_tensor, mass, mode, float(omega), flux_weight = 0.0)
+    u_re, u_im, J, total_loss, loss_flux, loss_ode, loss_ode_re, loss_ode_im, res_ode_re, res_ode_im, P_re, P_im, Q_re, Q_im = compute_loss(model, x_tensor, mass, mode, float(omega), flux_weight = 1.0)
 
     return {'x': x_tensor.detach().cpu().numpy().flatten(), 'u_re': u_re.detach().cpu().numpy().flatten(), 'u_im': u_im.detach().cpu().numpy().flatten(), 'flux': J.detach().cpu().numpy().flatten(),
             'res_re': res_ode_re.detach().cpu().numpy().flatten(), 'res_im': res_ode_im.detach().cpu().numpy().flatten()}
@@ -1778,7 +1783,7 @@ run_config = {
 
     "model": {"in_channels": N_INPUTS, "extra_input": args.extra_input, "out_channels": 4, "hidden_channels": 64, "hidden_layers": 3, "activation": "keerie_adaptive_tanh", "activation_n": 10.0, "ansatz_x_power": ansatz_x_power},
 
-    "ansatz_envelope": {"enabled": True, "type": "gated_static_solution_times_far_zone_taper", "Momega_b_fixed": ENVELOPE_M_OMEGA_B, "gate_exponent": int(2 * (mode + 1)),
+    "ansatz_envelope": {"enabled": True, "type": "gated_static_solution_times_far_zone_taper", "Momega_b_fixed": ENVELOPE_M_OMEGA_B, "gate_exponent": GATE_P,
         "characteristic_radius_scale_C_l": characteristic_radius_scale(mode),
         "static_solution_coefficients": {str(k): float(v) for k, v in static_solution_coeffs(mode).items()}, "trainable": False},
 
@@ -2213,7 +2218,7 @@ for omega_plot in diagnostic_omegas:
 
     plt.subplot(1, 2, 1)
     plt.suptitle("Post-training Direct Neural Network Outputs\n"
-                rf"P & Q for $\ell$ = {mode}, omega = {omega_plot:.4f}")
+                rf"P & Q for $\ell$ = {mode}, $M \omega$ = {mass*omega_plot:.4f}")
     plt.plot(x_plot, P_re, label='Re(P)')
     plt.plot(x_plot, P_im, label='Im(P)')
     plt.plot(x_plot, Q_re, label='Re(Q)')
@@ -2240,7 +2245,7 @@ for omega_plot in diagnostic_omegas:
     plt.figure(figsize=[14, 6])
 
     plt.subplot(1, 2, 1)
-    plt.suptitle("Wave function u built via ansatz of P and Q\n" + ansatz_label + rf" for $\ell$ = {mode}, omega = {omega_plot:.4f}")
+    plt.suptitle("Wave function u built via ansatz of P and Q\n" + ansatz_label + rf" for $\ell$ = {mode}, $M \omega$ = {mass*omega_plot:.4f}")
     plt.plot(x_plot, u_re, label=r'$\Re(u_{NN})$')
     plt.plot(x_plot, u_im, label=r'$\Im(u_{NN})$')
     plt.xlabel('x', fontsize = 16)
