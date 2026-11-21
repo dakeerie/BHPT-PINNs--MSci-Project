@@ -2,7 +2,7 @@
 # directory, and a logs/ directory).
 #
 # Three independent cold-start jobs, l = 2, 3, 4:
-#   u = 1 + x E(x, omega)[P + e^{2 i omega r*} Q]  (taylor_order = 0), gate at 70% the eikonal barrier peak frequency, M*omega = (l + 1/2)/(3*sqrt(3))
+#   u = 1 + x E(x, omega)[P + e^{2 i omega r*} Q]  (taylor_order = 0), gate at 60%  the eikonal barrier peak frequency, M*omega = (l + 1/2)/(3*sqrt(3))
 #   log-uniform omega sampling, curriculum over the first 30% of Adam, omega*r/(1 + omega*r) third input,
 #   envelope-normalised residuals, pure physics loss (ODE + flux).
 
@@ -32,11 +32,13 @@ taylor_order = 0
 res_norm = env
 pi_ustar_scale = 56.0
 seed = 0
+omega_hf_fraction = 0.25
+omega_hf_band_start = 0.4
 run_numerical = no
-run_tag = T0_g06p4_128wide_l$(mode)
+run_tag = T0_g06p4_128wide_hf_l$(mode)
 extra_args =
 
-arguments = "--mass $(mass) --mode $(mode) --x_extract $(x_extract) --omega_start $(omega_start) --omega_final $(omega_final) --query_steps $(query_steps) --adam_steps $(adam_steps) --lbfgs_steps $(lbfgs_steps) --curriculum_start $(curriculum_start) --curriculum_begin $(curriculum_begin) --curriculum_end $(curriculum_end) --omega_sampling $(omega_sampling) --extra_input $(extra_input) --envelope_M_omega_b $(envelope_M_omega_b) --envelope_gate_fraction $(envelope_gate_fraction) --envelope_gate_exponent $(envelope_gate_exponent) --taylor_order $(taylor_order) --res_norm $(res_norm) --pi_ustar_scale $(pi_ustar_scale) --seed $(seed) --run_numerical $(run_numerical) --run_tag $(run_tag) $(extra_args)"
+arguments = "--mass $(mass) --mode $(mode) --x_extract $(x_extract) --omega_start $(omega_start) --omega_final $(omega_final) --query_steps $(query_steps) --adam_steps $(adam_steps) --lbfgs_steps $(lbfgs_steps) --curriculum_start $(curriculum_start) --curriculum_begin $(curriculum_begin) --curriculum_end $(curriculum_end) --omega_sampling $(omega_sampling) --extra_input $(extra_input) --envelope_M_omega_b $(envelope_M_omega_b) --envelope_gate_fraction $(envelope_gate_fraction) --envelope_gate_exponent $(envelope_gate_exponent) --taylor_order $(taylor_order) --res_norm $(res_norm) --pi_ustar_scale $(pi_ustar_scale) --seed $(seed) --omega_hf_fraction $(omega_hf_fraction) --omega_hf_band_start $(omega_hf_band_start) --run_numerical $(run_numerical) --run_tag $(run_tag) $(extra_args)"
 
 getenv = True
 
