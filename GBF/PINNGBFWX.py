@@ -1314,7 +1314,7 @@ def save_training_diagnostics(model, epoch_number, omega):
     plt.plot(hist_epochs, hist_flux, label = 'Flux')
     plt.plot(hist_epochs, hist_ode_re, label = 'Real ODE')
     plt.plot(hist_epochs, hist_ode_im, label = 'Imag ODE')
-    plt.axvline(adam_iterations, color = 'k', linestyle = '--', linewidth = 1, alpha = 0.8, label = 'Adam -> L-BFGS')
+    plt.axvline(adam_iterations, color = 'k', linestyle = '--', alpha = 0.6)
     plt.yscale('log')
     plt.xlabel('Epoch', fontsize = 16)
     plt.ylabel('Loss', fontsize = 16)
@@ -1325,6 +1325,25 @@ def save_training_diagnostics(model, epoch_number, omega):
     plt.legend()
     plt.tight_layout()
     plt.savefig(os.path.join(diagnostic_dir, 'latest_loss.png'), format = 'png')
+    plt.close()
+
+    plt.figure(figsize = [7, 5])
+    plt.plot(hist_epochs, hist_total, label = 'Total')
+    plt.plot(hist_epochs, hist_ode, label = 'ODE')
+    plt.plot(hist_epochs, hist_flux, label = 'Flux')
+    # plt.plot(hist_epochs, hist_ode_re, label = 'Real ODE')
+    # plt.plot(hist_epochs, hist_ode_im, label = 'Imag ODE')
+    plt.axvline(adam_iterations, color = 'k', linestyle = '--', alpha = 0.6)
+    plt.yscale('log')
+    plt.xlabel('Epoch', fontsize = 16)
+    plt.ylabel('Loss', fontsize = 16)
+    plt.title(rf'PINN Loss Curves, $\ell$ = {mode}'
+            '\n'
+            f'Residual Normalisation: {args.res_norm}', fontsize = 16)
+    plt.grid()
+    plt.legend()
+    plt.tight_layout()
+    plt.savefig(os.path.join(diagnostic_dir, 'refined_latest_loss.png'), format = 'png')
     plt.close()
 
     diagnostic_dir_omega = os.path.join(diagnostic_dir, f'omega{omega:.4f}')
@@ -1646,7 +1665,7 @@ t.manual_seed(args.seed)
 if t.cuda.is_available():
     t.cuda.manual_seed_all(args.seed)
 
-#2,3 -> 4 PINN with 3 hidden layers each 64 neurons wide i.e. 2,3 -> 128 -> 128 -> 128 -> 4
+#2,3 -> 4 PINN with 3 hidden layers each 128 neurons wide i.e. 2,3 -> 128 -> 128 -> 128 -> 4
 model = Model(N_INPUTS, 4, 128, num_hidden_layers = 3).to(device = device, dtype = DTYPE)
 
 #Make various directories for saving results
@@ -1710,6 +1729,8 @@ if args.reextract_checkpoint is not None:
             raise ValueError(f"--{key} = {getattr(args, key)} does not match the checkpoint value {saved_args[key]}")
     if saved_args.get("envelope_gate_fraction") != args.envelope_gate_fraction:
         raise ValueError(f"--envelope_gate_fraction = {args.envelope_gate_fraction} does not match the checkpoint value {saved_args.get('envelope_gate_fraction')}")
+    if saved_args.get("envelope_gate_exponent") != args.envelope_gate_exponent:
+        raise ValueError(f"--envelope_gate_exponent = {args.envelope_gate_exponent} does not match the checkpoint value {saved_args.get('envelope_gate_exponent')}")
     #Previous checkpoints have no 'extra_input' and are 2-input models
     if saved_args.get("extra_input", "none") != args.extra_input:
         raise ValueError(f"--extra_input = {args.extra_input} does not match the checkpoint value {saved_args.get('extra_input', 'none')}")
@@ -1781,7 +1802,7 @@ run_config = {
 
     "reproducibility": {"torch_seed": args.seed, "dtype": str(DTYPE), "device": str(device)},
 
-    "model": {"in_channels": N_INPUTS, "extra_input": args.extra_input, "out_channels": 4, "hidden_channels": 64, "hidden_layers": 3, "activation": "keerie_adaptive_tanh", "activation_n": 10.0, "ansatz_x_power": ansatz_x_power},
+    "model": {"in_channels": N_INPUTS, "extra_input": args.extra_input, "out_channels": 4, "hidden_channels": 128, "hidden_layers": 3, "activation": "keerie_adaptive_tanh", "activation_n": 10.0, "ansatz_x_power": ansatz_x_power},
 
     "ansatz_envelope": {"enabled": True, "type": "gated_static_solution_times_far_zone_taper", "Momega_b_fixed": ENVELOPE_M_OMEGA_B, "gate_exponent": GATE_P,
         "characteristic_radius_scale_C_l": characteristic_radius_scale(mode),
@@ -2171,9 +2192,9 @@ plt.close(fig)
 plt.figure(figsize = (7, 5))
 plt.loglog(mass*dense_query_omegas, np.maximum(np.abs(query_scaled_flux), 1e-17), label = r"$|\,|\alpha|^2 - |\beta|^2 - 1\,|/(|\alpha|^2 + |\beta|^2)$")
 plt.xlabel(r"$M\omega$", fontsize = 16)
-plt.ylabel("Scaled flux error")
+plt.ylabel(r"$\frac{||\alpha|^2 - |\beta|^2|}{|\alpha|^2 + |\beta|^2}$", fontsize = 16)
 plt.grid(True, which = "both", alpha = 0.3)
-plt.legend()
+# plt.legend()
 plt.tight_layout()
 plt.savefig(os.path.join(results_dir, "scaled_flux_res.png"), dpi = 200, format = 'png')
 plt.close()
@@ -2218,23 +2239,23 @@ for omega_plot in diagnostic_omegas:
 
     plt.subplot(1, 2, 1)
     plt.suptitle("Post-training Direct Neural Network Outputs\n"
-                rf"P & Q for $\ell$ = {mode}, $M \omega$ = {mass*omega_plot:.4f}")
+                rf"$P$ & $Q$ for $\ell$ = {mode}, $M \omega$ = {mass*omega_plot:.4f}")
     plt.plot(x_plot, P_re, label='Re(P)')
     plt.plot(x_plot, P_im, label='Im(P)')
     plt.plot(x_plot, Q_re, label='Re(Q)')
     plt.plot(x_plot, Q_im, label='Im(Q)')
-    plt.xlabel('x', fontsize = 16)
-    plt.ylabel('P and Q', fontsize = 16)
+    plt.xlabel(r'$x$', fontsize = 16)
+    plt.ylabel(r'$P$ & $Q$', fontsize = 16)
     plt.legend()
     plt.grid()
 
     plt.subplot(1, 2, 2)
-    plt.plot(r_plot/mass, P_re, label='Re(P)')
-    plt.plot(r_plot/mass, P_im, label='Im(P)')
-    plt.plot(r_plot/mass, Q_re, label='Re(Q)')
-    plt.plot(r_plot/mass, Q_im, label='Im(Q)')
+    plt.plot(r_plot/mass, P_re, label=r'$\Re(P)$')
+    plt.plot(r_plot/mass, P_im, label=r'$\Im(P)$')
+    plt.plot(r_plot/mass, Q_re, label=r'$\Re(Q)$')
+    plt.plot(r_plot/mass, Q_im, label=r'$\Im(Q)$')
     plt.xlabel(r'$r/M$', fontsize = 16)
-    plt.ylabel('P and Q', fontsize = 16)
+    plt.ylabel(r'$P$ and $Q$', fontsize = 16)
     plt.legend()
     plt.grid()
 
@@ -2245,10 +2266,10 @@ for omega_plot in diagnostic_omegas:
     plt.figure(figsize=[14, 6])
 
     plt.subplot(1, 2, 1)
-    plt.suptitle("Wave function u built via ansatz of P and Q\n" + ansatz_label + rf" for $\ell$ = {mode}, $M \omega$ = {mass*omega_plot:.4f}")
+    plt.suptitle(r"Wave function $u$ built via ansatz of $P$ and $Q$" + "\n" + ansatz_label + rf" for $\ell$ = {mode}, $M \omega$ = {mass*omega_plot:.4f}")
     plt.plot(x_plot, u_re, label=r'$\Re(u_{NN})$')
     plt.plot(x_plot, u_im, label=r'$\Im(u_{NN})$')
-    plt.xlabel('x', fontsize = 16)
+    plt.xlabel(r'$x$', fontsize = 16)
     plt.ylabel(r'$u(x)$', fontsize = 16)
     plt.legend()
     plt.grid()
@@ -2257,7 +2278,7 @@ for omega_plot in diagnostic_omegas:
     plt.plot(r_plot/mass, u_re, label=r'$\Re(u_{NN})$')
     plt.plot(r_plot/mass, u_im, label=r'$\Im(u_{NN})$')
     plt.xlabel(r'$r/M$', fontsize = 16)
-    plt.ylabel('u(r)', fontsize = 16)
+    plt.ylabel(r'$u(r)$', fontsize = 16)
     plt.legend()
     plt.grid()
 
@@ -2273,12 +2294,12 @@ for omega_plot in diagnostic_omegas:
     plt.subplot(4, 2, 1)
     plt.suptitle(rf'Wavefunction Pipeline for $M \omega$ = {mass*omega_plot:.4f}', fontsize = 18)
     plt.title(r'PINN Output $P(x)$ & $Q(x)$', fontsize = 16)
-    plt.plot(x_plot, P_re, label='Re(P)')
-    plt.plot(x_plot, P_im, label='Im(P)')
-    plt.plot(x_plot, Q_re, label='Re(Q)')
-    plt.plot(x_plot, Q_im, label='Im(Q)')
-    plt.xlabel('x', fontsize = 16)
-    plt.ylabel('P and Q', fontsize = 16)
+    plt.plot(x_plot, P_re, label=r'$\Re(P)$')
+    plt.plot(x_plot, P_im, label=r'$\Im(P)$')
+    plt.plot(x_plot, Q_re, label=r'$\Re(Q)$')
+    plt.plot(x_plot, Q_im, label=r'$\Im(Q)$')
+    plt.xlabel(r'$x$', fontsize = 16)
+    plt.ylabel(r'$P$ & $Q$', fontsize = 16)
     plt.legend()
     plt.grid()
 
@@ -2290,7 +2311,7 @@ for omega_plot in diagnostic_omegas:
     plt.plot(r_plot/mass, Q_im, label='Im(Q)')
     plt.xscale('log')
     plt.xlabel(r'$r/M$', fontsize = 16)
-    plt.ylabel(r'$P$ and $Q$', fontsize = 16)
+    plt.ylabel(r'$P$ & $Q$', fontsize = 16)
     plt.legend()
     plt.grid()
 
@@ -2605,7 +2626,7 @@ with open(result_file_path, 'w') as f:
     f.write(f"lbfgs_success = {lbfgs_success}\n")
 
 checkpoint = {'model_state_dict': model.state_dict(),
-            'model_architecture': {'in_channels': N_INPUTS, 'extra_input': args.extra_input, 'out_channels': 4, 'hidden_channels': 64, 'hidden_layers': 3},
+            'model_architecture': {'in_channels': N_INPUTS, 'extra_input': args.extra_input, 'out_channels': 4, 'hidden_channels': 128, 'hidden_layers': 3},
             'activation_config': {'type': 'keerie_adaptive_tanh', 'n': 10.0},
             'omega_input_scaling': {'omega_min': omega_min, 'omega_max': omega_max},
             'rar_config': {'interval': RAR_INTERVAL, 'candidates': RAR_CANDIDATES, 'add_per_refinement': RAR_ADD, 'max_points': RAR_MAX, 'min_joint_distance': RAR_MIN_JOINT_DISTANCE,
@@ -2757,11 +2778,11 @@ Momega_common = mass*omega_common
 asymptotic_gbf = low_frequency_limit_GBF(mass, mode, omega_common)
 lowfreq_mask = Momega_common <= 0.1     #show the C_l (M omega)^(2l + 2) asymptote only where it applies
 
-plt.figure(figsize = (7, 6))
-plt.plot(mass*omega_common, query_numerical_gbfs, label = 'Simulation')
-plt.plot(mass*omega_common, query_pinn_gbfs, label = 'PINN')
-plt.plot(mass*omega_common, PI_T, label = 'Product Integral')
-plt.plot(mass*omega_common[lowfreq_mask], asymptotic_gbf[lowfreq_mask], "--", label = "Low-frequency limit")
+plt.figure(figsize = (7, 5))
+plt.plot(mass*omega_common, query_numerical_gbfs, ":", color = 'blue', zorder = 3, label = 'Numerical')
+plt.plot(mass*omega_common, query_pinn_gbfs, color = 'green', zorder = 1, label = 'PINN')
+plt.plot(mass*omega_common, PI_T, "--", color = 'orange', zorder = 3, label = 'Product integral')
+plt.plot(mass*omega_common[lowfreq_mask], asymptotic_gbf[lowfreq_mask], "-.", color = 'red', label = "Low-frequency limit")
 plt.xscale('log')
 plt.yscale('log')
 plt.xlabel(r"$M \omega$", fontsize = 16)
@@ -2770,7 +2791,21 @@ plt.title(rf"GBF Comparison, $M$ = {mass}, $\ell$ = {mode}", fontsize = 16)
 plt.grid()
 plt.legend()
 plt.tight_layout()
-plt.savefig(os.path.join(comparisons_dir, "Full_GBF_comparison.png"), format = 'png', dpi = 200)
+plt.savefig(os.path.join(comparisons_dir, "Full_GBF_comparison_log.png"), format = 'png', dpi = 200)
+plt.close()
+
+plt.figure(figsize = (7, 5))
+plt.plot(mass*omega_common, query_numerical_gbfs, ":", color = 'blue', zorder = 3, label = 'Numerical')
+plt.plot(mass*omega_common, query_pinn_gbfs, color = 'green', zorder = 1, label = 'PINN')
+plt.plot(mass*omega_common, PI_T, "--", color = 'orange', zorder = 3, label = 'Product integral')
+plt.plot(mass*omega_common[lowfreq_mask], asymptotic_gbf[lowfreq_mask], "-.", color = 'red', label = "Low-frequency limit")
+plt.xlabel(r"$M \omega$", fontsize = 16)
+plt.ylabel(r"$\Gamma(M \omega)$", fontsize = 16)
+plt.title(rf"GBF Comparison, $M$ = {mass}, $\ell$ = {mode}", fontsize = 16)
+plt.grid()
+plt.legend()
+plt.tight_layout()
+plt.savefig(os.path.join(comparisons_dir, "Full_GBF_comparison_linear.png"), format = 'png', dpi = 200)
 plt.close()
 
 #x is M*omega in product integral formalism (not compactified coordinate)
