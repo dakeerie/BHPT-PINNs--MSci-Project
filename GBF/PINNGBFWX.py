@@ -61,6 +61,9 @@ parser.add_argument('--no_numerical_csv', action = 'store_true', help = 'Skip th
 parser.add_argument('--pi_ustar_scale', type = float, default = 56.0, help = 'Product-integral cut-off u*_max = max(350, pi_ustar_scale/(M omega)); 0 gives the old fixed u*_max = 350')
 parser.add_argument('--run_tag', type = str, default = '', help = 'Label appended to the output folder name, so parallel runs with the same mass/x/omega/steps do not collide')
 parser.add_argument('--seed', type = int, default = 0, help = 'Torch random seed: network initialisation and all x/omega/RAR sampling')
+#High-frequency sampling supplement
+parser.add_argument('--omega_hf_fraction', type = float, default = 0.0, help = 'Fraction of every training batch drawn uniformly in omega from the high-frequency band [omega_hf_lower, omega_start]. 0 disables')
+parser.add_argument('--omega_hf_band_start', type = float, default = 0.4, help = 'Lower edge of the high-frequency band as a fraction of the eikonal potential peak frequency M*omega_c = (l + 1/2)/(3 sqrt(3))')
 
 args = parser.parse_args()
 mass = args.mass
@@ -264,11 +267,15 @@ if args.envelope_gate_fraction is not None:
     ENVELOPE_M_OMEGA_B = args.envelope_gate_fraction*EIKONAL_M_OMEGA
 else:
     ENVELOPE_M_OMEGA_B = float(args.envelope_M_omega_b)
-print(f"Envelope gate: M*omega_b = {ENVELOPE_M_OMEGA_B:.4g} (eikonal barrier top M*omega = {EIKONAL_M_OMEGA:4g})", flush = True)
+print(f"Envelope gate: M*omega_b = {ENVELOPE_M_OMEGA_B:.4g} (eikonal barrier top M*omega = {EIKONAL_M_OMEGA:.4g})", flush = True)
 
 GATE_P = float(args.envelope_gate_exponent) if args.envelope_gate_exponent is not None else 2.0*(mode + 1)
 if GATE_P <= 0:
     raise ValueError("envelope_gate_exponent must be positive")
+
+OMEGA_HF_LOWER = min(max(args.omega_hf_band_start*EIKONAL_M_OMEGA/mass, omega_min), omega_max)
+if args.omega_hf_fraction > 0:
+    print(f"High-frequency supplement: {100*args.omega_hf_fraction:.0f}% of each batch uniform in M*omega in [{mass*OMEGA_HF_LOWER:.4g}, {mass*omega_max:.4g}]", flush = True)
 
 def characteristic_radius_scale(mode):
     #c_l = ((2l + 1)!!)**(1/(l+1)), used in the characteristic radius: epsilon = 2Momega/c_l
@@ -515,19 +522,30 @@ def sample_log_uniform_omega(n_points, omega_lower, dtype, device):
     return t.exp(log_lower + (log_upper - log_lower)*t.rand((n_points, 1), dtype = dtype, device = device))
 
 def sample_omega_points(n_points, omega_lower, dtype, device):
+
+    #Base distribution (log-uniform or 60% uniform + 40% Beta(0.6, 2)) for n_points - n_hf samples, plus n_hf samples drawn uniformly in omega over the high-frequency band
+    #[max(omega_hf_lower, omega_lower), omega_max] to improve network sensitivity at high frequencies (important for higher l values)
+    n_hf = int(round(args.omega_hf_fraction*n_points))
+    n_base = n_points - n_hf
+
     if args.omega_sampling == 'log_uniform':
-        return sample_log_uniform_omega(n_points, omega_lower, dtype, device)
+        omega_samples = sample_log_uniform_omega(n_base, omega_lower, dtype, device)
+    else:
+        n_uniform = int(0.6*n_base)
+        n_beta = n_base - n_uniform
 
-    #Combination uniform and beta sampled omega with higher weight on low frequencies
-    n_uniform = int(0.6*n_points)
-    n_beta = n_points - n_uniform
+        omega_uniform = omega_lower + (omega_max - omega_lower)*t.rand((n_uniform, 1), dtype=dtype, device=device)
 
-    omega_uniform = omega_lower + (omega_max - omega_lower)*t.rand((n_uniform, 1), dtype=dtype, device=device)
+        beta_samples = omega_beta_dist.sample((n_beta,)).reshape(-1, 1)
+        omega_beta = omega_lower + (omega_max - omega_lower)*beta_samples
 
-    beta_samples = omega_beta_dist.sample((n_beta,)).reshape(-1, 1)
-    omega_beta = omega_lower + (omega_max - omega_lower)*beta_samples
+        omega_samples = t.cat([omega_uniform, omega_beta], dim=0)
 
-    omega_samples = t.cat([omega_uniform, omega_beta], dim=0)
+    if n_hf > 0:
+        hf_lower = max(OMEGA_HF_LOWER, omega_lower)
+        omega_hf = hf_lower + (omega_max - hf_lower)*t.rand((n_hf, 1), dtype = dtype, device = device)
+        omega_samples = t.cat([omega_samples, omega_hf], dim = 0)
+
 
     #Reshuffle omega samples
     permutation = t.randperm(n_points, device=device)
@@ -2192,7 +2210,7 @@ plt.close(fig)
 plt.figure(figsize = (7, 5))
 plt.loglog(mass*dense_query_omegas, np.maximum(np.abs(query_scaled_flux), 1e-17), label = r"$|\,|\alpha|^2 - |\beta|^2 - 1\,|/(|\alpha|^2 + |\beta|^2)$")
 plt.xlabel(r"$M\omega$", fontsize = 16)
-plt.ylabel(r"$\frac{||\alpha|^2 - |\beta|^2|}{|\alpha|^2 + |\beta|^2}$", fontsize = 16)
+plt.ylabel(r"$\frac{||\alpha|^2 - |\beta|^2 - 1|}{|\alpha|^2 + |\beta|^2}$", fontsize = 16)
 plt.grid(True, which = "both", alpha = 0.3)
 # plt.legend()
 plt.tight_layout()
@@ -2788,7 +2806,7 @@ plt.yscale('log')
 plt.xlabel(r"$M \omega$", fontsize = 16)
 plt.ylabel(r"$\Gamma(M \omega)$", fontsize = 16)
 plt.title(rf"GBF Comparison, $M$ = {mass}, $\ell$ = {mode}", fontsize = 16)
-plt.grid()
+plt.grid(zorder = 0)
 plt.legend()
 plt.tight_layout()
 plt.savefig(os.path.join(comparisons_dir, "Full_GBF_comparison_log.png"), format = 'png', dpi = 200)
@@ -2802,7 +2820,7 @@ plt.plot(mass*omega_common[lowfreq_mask], asymptotic_gbf[lowfreq_mask], "-.", co
 plt.xlabel(r"$M \omega$", fontsize = 16)
 plt.ylabel(r"$\Gamma(M \omega)$", fontsize = 16)
 plt.title(rf"GBF Comparison, $M$ = {mass}, $\ell$ = {mode}", fontsize = 16)
-plt.grid()
+plt.grid(zorder = 0)
 plt.legend()
 plt.tight_layout()
 plt.savefig(os.path.join(comparisons_dir, "Full_GBF_comparison_linear.png"), format = 'png', dpi = 200)
